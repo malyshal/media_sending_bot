@@ -1,4 +1,4 @@
-from aiogram import Router, types
+from aiogram import Router, types, Bot
 from aiogram.filters import Command
 import structlog
 from app.services.delivery_service import DeliveryService
@@ -9,7 +9,8 @@ logger = structlog.get_logger()
 router = Router()
 
 @router.message(Command("next"))
-async def cmd_next(message: types.Message, bot: types.Bot):
+async def cmd_next(message: types.Message, bot: Bot):
+
     chat_id = message.chat.id
     logger.info("cmd_next_received", chat_id=chat_id)
     

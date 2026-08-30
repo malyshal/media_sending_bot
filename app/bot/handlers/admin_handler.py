@@ -1,4 +1,4 @@
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 import structlog
 from app.db.session import async_session
@@ -45,7 +45,7 @@ async def cmd_stats(message: types.Message):
         await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("force_send"))
-async def cmd_force_send(message: types.Message, bot: types.Bot):
+async def cmd_force_send(message: types.Message, bot: Bot):
     if not await admin_filter(message):
         return
 
