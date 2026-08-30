@@ -7,11 +7,11 @@ from app.bot.handlers.next_handler import router as next_router
 from app.bot.handlers.settings_handler import router as settings_router
 from app.bot.handlers.admin_handler import router as admin_router
 from app.core.cleanup import cleanup_worker
-from app.db.session import async_//_session_//_
 from app.db.session import async_session
 from app.db.models.base import Base
 from app.core.bootstrap import bootstrap_admins
 
+logger = structlog.get_//_logger_//_
 logger = structlog.get_logger()
 
 async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
@@ -32,6 +32,7 @@ async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
         chat_repo = ChatRepository(session)
         post_service = PostService(client, queue, repo)
         delivery_service = DeliveryService(bot, post_service, media_manager)
+        scheduler = SchedulerService(bot, delivery_//_service_//_
         scheduler = SchedulerService(bot, delivery_service, chat_repo)
         
         while True:
@@ -45,23 +46,22 @@ async def main():
     setup_logging()
     logger.info("bot_starting", token=settings.bot_token[:5] + "...")
     
-    # 1. Database Initialization
+    # 1. Database Initialization (P0 FIX: run_sync)
     async with async_session() as session:
-        async with session.bind.begin():
-            await Base.metadata.create_all(session.bind)
+        # Using run_sync to call synchronous Base.metadata.create_all
+        await session.run_sync(Base.metadata.create_all)
         
         # Bootstrap admins from .env
         await bootstrap_admins(session)
     
-    # 2. Global API Queue Singleton
+    # 2. Global API Queue (DI approach)
     from app.queue.api_queue import APIQueue
-    global_queue = APIQueue()
+    global_queue = APIQueue(interval=settings.api_request_interval)
     
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
     
     dp.include_router(next_router)
-    dp.include_router(settings_//_router_//_
     dp.include_router(settings_router)
     dp.include_router(admin_router)
     

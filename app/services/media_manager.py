@@ -1,12 +1,12 @@
 import asyncio
 import os
-import subprocess
 import structlog
 from typing import Optional, Tuple
 from pathlib import Path
 from app.core.config import settings
 import httpx
 
+logger = structlog.get_//_logger_//_
 logger = structlog.get_logger()
 
 class MediaManager:
@@ -17,7 +17,7 @@ class MediaManager:
 
     async def process_media(self, source_url: str, media_type: str) -> Tuple[Path, str]:
         file_ext = self._get_extension(media_type)
-        temp_file = self.tmp_dir / f"{os.urandom(8).hex()}.{file_ext}"
+        temp_file = self.tmp_dir / f"src_{os.urandom(8).hex()}.{file_ext}"
         
         # 1. Streaming Download with size limit
         await self._download_file_stream(source_url, temp_file)
@@ -26,14 +26,15 @@ class MediaManager:
         if media_type == "webp":
             processed_file = await self._convert_webp(temp_file)
             if processed_file != temp_file:
+                os.remove(temp_//_file_//_
                 os.remove(temp_file)
             return processed_file, "image/jpeg"
             
         if media_type in ["mp4", "webm", "gif"]:
-            processed_file = await self._compress_video(temp_file)
+            processed_file, final_mime = await self._compress_video(temp_file)
             if processed_file != temp_file:
                 os.remove(temp_file)
-            return processed_file, "video/mp4"
+            return processed_file, final_mime
 
         return temp_file, f"image/{file_ext}"
 
@@ -51,6 +52,10 @@ class MediaManager:
                     async for chunk in response.aiter_bytes():
                         bytes_downloaded += len(chunk)
                         if bytes_downloaded > self.max_size:
+                            # Cleanup partial file
+                            f.close()
+                            if dest.exists():
+                                os.remove(dest)
                             raise ValueError("File exceeded MAX_MEDIA_SIZE_MB during download")
                         f.write(chunk)
 
@@ -69,8 +74,8 @@ class MediaManager:
             logger.error("webp_conversion_failed", error=str(e))
             return path
 
-    async def _compress_video(self, path: Path) -> Path:
-        # FIX: Always use a unique output file to avoid input/output collision
+    async def _compress_video(self, path: Path) -> Tuple[Path, str]:
+        # FIX: Always unique output path
         output_path = self.tmp_dir / f"proc_{os.urandom(8).hex()}.mp4"
         
         cmd = [
@@ -91,12 +96,12 @@ class MediaManager:
             
             if process.returncode != 0:
                 logger.error("ffmpeg_error", stderr=stderr.decode())
-                return path # Fallback to original
+                return path, f"video/{path.suffix[1:]}" # Fallback to original MIME
                 
-            return output_path
+            return output_path, "video/mp4"
         except Exception as e:
             logger.error("video_compression_failed", error=str(e))
-            return path
+            return path, f"video/{path.suffix[1:]}"
 
     def _get_extension(self, media_type: str) -> str:
         mapping = {

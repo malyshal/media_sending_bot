@@ -15,12 +15,15 @@ class Settings(BaseSettings):
     # JoyReactor API Settings
     joyreactor_api_key: str | None = None
     joyreactor_base_url: str = "https://joyreactor.cc"
+    api_request_interval: float = 2.0
     
     # Application Settings
     log_level: str = "INFO"
     log_retention_days: int = 7
     cache_retention_hours: int = 6
     max_fresh_posts_for_batch: int = 20
+    max_media_size_mb: int = 50
+    default_timezone: str = "Europe/Moscow"
     
     model_config = SettingsConfigDict(
         env_file=".env", 

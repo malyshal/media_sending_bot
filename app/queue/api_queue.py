@@ -14,32 +14,20 @@ class APIRequest(NamedTuple):
     attempts: int = 0
 
 class APIQueue(BaseQueue):
-    _instance = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(APIQueue, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self, interval: float = 2.0):
-        if self._initialized:
-            return
-        
         self._queue = asyncio.PriorityQueue()
         self._interval = interval
         self._running = True
         self._counter = 0
         self._retry_delays = [1, 5, 15]
         self._worker_task = asyncio.create_task(self._worker())
-        self._initialized = True
 
     async def enqueue(self, task: Callable[..., Awaitable[Any]], *args, priority: int = 1, **kwargs):
         future = asyncio.get_running_loop().create_future()
         request = APIRequest(task, args, kwargs, future, priority)
         
         self._counter += 1
-        # (priority, sequence, request) -> prevents TypeError when priority is same
+        # Sequence prevents comparing Callables in PriorityQueue
         await self._queue.put((priority, self._counter, request))
         return await future
 
@@ -58,6 +46,7 @@ class APIQueue(BaseQueue):
                         logger.warning("api_request_retry", attempt=request.attempts+1, delay=delay, error=str(e))
                         
                         retry_request = request._replace(attempts=request.attempts + 1)
+                        # Schedule retry
                         asyncio.create_task(self._schedule_retry(priority, retry_request, delay))
                     else:
                         logger.error("api_request_failed_after_retries", error=str(e))
