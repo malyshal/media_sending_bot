@@ -5,6 +5,7 @@ import structlog
 from typing import Optional, Tuple
 from pathlib import Path
 from app.core.config import settings
+import httpx
 
 logger = structlog.get_logger()
 
@@ -12,16 +13,14 @@ class MediaManager:
     def __init__(self, tmp_dir: str = "tmp/media"):
         self.tmp_dir = Path(tmp_dir)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.max_size = getattr(settings, "max_media_size_mb", 50) * 1024 * 1024
 
     async def process_media(self, source_url: str, media_type: str) -> Tuple[Path, str]:
-        """
-        Downloads media, processes it (converts/compresses), and returns the local path.
-        """
         file_ext = self._get_extension(media_type)
         temp_file = self.tmp_dir / f"{os.urandom(8).hex()}.{file_ext}"
         
-        # 1. Download
-        await self._download_file(source_url, temp_file)
+        # 1. Streaming Download with size limit
+        await self._download_file_stream(source_url, temp_file)
         
         # 2. Process based on type
         if media_type == "webp":
@@ -38,19 +37,27 @@ class MediaManager:
 
         return temp_file, f"image/{file_ext}"
 
-    async def _download_file(self, url: str, dest: Path):
-        import httpx
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-            with open(dest, "wb") as f:
-                f.write(resp.content)
+    async def _download_file_stream(self, url: str, dest: Path):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream("GET", url, follow_redirects=True) as response:
+                response.raise_for_status()
+                
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > self.max_size:
+                    raise ValueError(f"File too large: {content_length} bytes")
+                
+                bytes_downloaded = 0
+                with open(dest, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        bytes_downloaded += len(chunk)
+                        if bytes_downloaded > self.max_size:
+                            raise ValueError("File exceeded MAX_MEDIA_SIZE_MB during download")
+                        f.write(chunk)
 
     async def _convert_webp(self, path: Path) -> Path:
         from PIL import Image
         output_path = path.with_suffix(".jpg")
         try:
-            # Run in thread because Pillow is blocking
             def convert():
                 with Image.open(path) as img:
                     rgb_img = img.convert("RGB")
@@ -63,8 +70,9 @@ class MediaManager:
             return path
 
     async def _compress_video(self, path: Path) -> Path:
-        output_path = path.with_suffix(".mp4")
-        # FFmpeg command: convert to h264, faststart for web, moderate bitrate
+        # FIX: Always use a unique output file to avoid input/output collision
+        output_path = self.tmp_dir / f"proc_{os.urandom(8).hex()}.mp4"
+        
         cmd = [
             "ffmpeg", "-y", "-i", str(path),
             "-vcodec", "libx264", "-crf", "28", 
@@ -79,11 +87,11 @@ class MediaManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
             
             if process.returncode != 0:
                 logger.error("ffmpeg_error", stderr=stderr.decode())
-                return path
+                return path # Fallback to original
                 
             return output_path
         except Exception as e:

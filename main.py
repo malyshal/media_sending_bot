@@ -7,23 +7,24 @@ from app.bot.handlers.next_handler import router as next_router
 from app.bot.handlers.settings_handler import router as settings_router
 from app.bot.handlers.admin_handler import router as admin_router
 from app.core.cleanup import cleanup_worker
+from app.db.session import async_//_session_//_
+from app.db.session import async_session
+from app.db.models.base import Base
+from app.core.bootstrap import bootstrap_admins
 
 logger = structlog.get_logger()
 
-async def scheduler_loop(bot: Bot):
+async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
     """Background task that checks schedules every minute."""
     from app.joyreactor.client import JoyReactorClient
-    from app.queue.api_queue import APIQueue
     from app.services.media_manager import MediaManager
     from app.services.post_service import PostService
     from app.services.delivery_service import DeliveryService
     from app.services.scheduler_service import SchedulerService
     from app.db.repositories.post_repository import PostRepository
     from app.db.repositories.chat_repository import ChatRepository
-    from app.db.session import async_session
     
     client = JoyReactorClient()
-    queue = APIQueue()
     media_manager = MediaManager()
     
     async with async_session() as session:
@@ -44,21 +45,28 @@ async def main():
     setup_logging()
     logger.info("bot_starting", token=settings.bot_token[:5] + "...")
     
+    # 1. Database Initialization
+    async with async_session() as session:
+        async with session.bind.begin():
+            await Base.metadata.create_all(session.bind)
+        
+        # Bootstrap admins from .env
+        await bootstrap_admins(session)
+    
+    # 2. Global API Queue Singleton
+    from app.queue.api_queue import APIQueue
+    global_queue = APIQueue()
+    
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
     
     dp.include_router(next_router)
+    dp.include_router(settings_//_router_//_
     dp.include_router(settings_router)
     dp.include_router(admin_router)
     
-    # Bootstrap admins
-    async with async_session() as session:
-        from app.core.bootstrap import bootstrap_admins
-        await bootstrap_admins(session)
-    
-    # Start scheduler in the background
-    asyncio.create_task(scheduler_loop(bot))
-    # Start cleanup worker in the background
+    # Start background tasks
+    asyncio.create_task(scheduler_loop(bot, global_queue))
     asyncio.create_task(cleanup_worker())
     
     try:

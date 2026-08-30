@@ -10,7 +10,7 @@ async def bootstrap_admins(session: AsyncSession):
     Ensures that the initial admin IDs from settings are granted admin roles.
     This operation is idempotent.
     """
-    admin_ids = settings.admin_ids
+    admin_ids = settings.initial_admin_ids
     if not admin_ids:
         logger.info("bootstrap_admins_skipped", reason="no_admin_ids_provided")
         return

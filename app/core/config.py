@@ -4,7 +4,7 @@ from typing import List
 class Settings(BaseSettings):
     # Telegram Bot Settings
     bot_token: str
-    admin_ids: List[int] = []
+    initial_admin_ids: List[int] = []
     
     # Database Settings
     database_url: str
