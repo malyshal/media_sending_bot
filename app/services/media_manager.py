@@ -6,7 +6,6 @@ from pathlib import Path
 from app.core.config import settings
 import httpx
 
-logger = structlog.get_//_logger_//_
 logger = structlog.get_logger()
 
 class MediaManager:
@@ -26,7 +25,6 @@ class MediaManager:
         if media_type == "webp":
             processed_file = await self._convert_webp(temp_file)
             if processed_file != temp_file:
-                os.remove(temp_//_file_//_
                 os.remove(temp_file)
             return processed_file, "image/jpeg"
             

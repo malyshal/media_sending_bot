@@ -74,7 +74,6 @@ async def process_tag_search(message: types.Message, query: str, state: FSMConte
             await message.answer("Произошла ошибка при поиске тегов.")
         finally:
             await client.close()
-            await queue.stop()
 
 @router.callback_query(F.data.startswith("tag_select:"))
 async def cb_tag_selected(callback: types.CallbackQuery, state: FSMContext):

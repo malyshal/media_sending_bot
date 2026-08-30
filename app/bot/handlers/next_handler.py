@@ -43,4 +43,3 @@ async def cmd_next(message: types.Message, bot: types.Bot):
             await message.answer("No new posts found for your filters right now! 😢")
         
         await client.close()
-        await queue.stop()

@@ -11,7 +11,6 @@ from app.db.session import async_session
 from app.db.models.base import Base
 from app.core.bootstrap import bootstrap_admins
 
-logger = structlog.get_//_logger_//_
 logger = structlog.get_logger()
 
 async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
@@ -32,7 +31,6 @@ async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
         chat_repo = ChatRepository(session)
         post_service = PostService(client, queue, repo)
         delivery_service = DeliveryService(bot, post_service, media_manager)
-        scheduler = SchedulerService(bot, delivery_//_service_//_
         scheduler = SchedulerService(bot, delivery_service, chat_repo)
         
         while True:

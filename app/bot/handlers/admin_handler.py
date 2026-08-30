@@ -74,4 +74,3 @@ async def cmd_force_send(message: types.Message, bot: types.Bot):
             await message.answer("❌ Не удалось найти пост для отправки.")
         
         await client.close()
-        await queue.stop()
