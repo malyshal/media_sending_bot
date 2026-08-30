@@ -1,0 +1,23 @@
+[project]
+name = "joybot"
+version = "0.1.0"
+description = "Telegram bot for delivering content from joyreactor.cc"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.0",
+    "sqlalchemy>=2.0",
+    "asyncpg",
+    "redis>=5.0",
+    "pydantic-settings",
+    "apscheduler",
+    "httpx",
+    "structlog",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"

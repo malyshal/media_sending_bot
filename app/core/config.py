@@ -1,0 +1,31 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List
+
+class Settings(BaseSettings):
+    # Telegram Bot Settings
+    bot_token: str
+    admin_ids: List[int] = []
+    
+    # Database Settings
+    database_url: str
+    
+    # Redis Settings
+    redis_url: str
+    
+    # JoyReactor API Settings
+    joyreactor_api_key: str | None = None
+    joyreactor_base_url: str = "https://joyreactor.cc"
+    
+    # Application Settings
+    log_level: str = "INFO"
+    log_retention_days: int = 7
+    cache_retention_hours: int = 6
+    max_fresh_posts_for_batch: int = 20
+    
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8",
+        case_sensitive=False
+    )
+
+settings = Settings()
