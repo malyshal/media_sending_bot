@@ -12,6 +12,7 @@ dependencies = [
     "apscheduler",
     "httpx",
     "structlog",
+    "Pillow",
 ]
 
 [build-system]

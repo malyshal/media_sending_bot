@@ -4,6 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.post import Post
 from app.db.models.history import PostHistory
 from app.db.models.chat import ChatConfig
+from datetime import datetime, timedelta
+import structlog
+
+logger = structlog.get_logger()
 
 class PostRepository:
     def __init__(self, session: AsyncSession):

@@ -5,7 +5,13 @@ from app.db.session import async_session
 from app.db.repositories.user_repository import UserRepository
 from app.db.repositories.chat_repository import ChatRepository
 from app.db.repositories.post_repository import PostRepository
+from app.db.models.chat import ChatConfig
+from app.db.models.user import UserAccount
+from app.db.models.post import Post
 from sqlalchemy import select, func
+
+logger = structlog.get_logger()
+router = Router()
 
 logger = structlog.get_logger()
 router = Router()

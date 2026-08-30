@@ -5,6 +5,10 @@ from app.services.post_service import PostService
 from app.services.media_manager import MediaManager
 from app.db.models.post import Post
 from pathlib import Path
+from app.db.session import async_session
+from sqlalchemy import delete, and_
+
+logger = structlog.get_logger()
 
 logger = structlog.get_logger()
 

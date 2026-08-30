@@ -2,25 +2,26 @@ import asyncio
 import structlog
 from aiogram import Bot, Dispatcher
 from app.core.config import settings
-from app.core.cleanup import cleanup_worker
+from app.core.logging import setup_logging
 from app.bot.handlers.next_handler import router as next_router
 from app.bot.handlers.settings_handler import router as settings_router
 from app.bot.handlers.admin_handler import router as admin_router
-from app.services.delivery_service import DeliveryService
-from app.services.post_service import PostService
-from app.services.media_manager import MediaManager
-from app.services.scheduler_service import SchedulerService
-from app.db.repositories.post_repository import PostRepository
-from app.db.repositories.chat_repository import ChatRepository
-from app.db.session import async_session
-from app.queue.api_queue import APIQueue
-from app.joyreactor.client import JoyReactorClient
+from app.core.cleanup import cleanup_worker
 
 logger = structlog.get_logger()
 
 async def scheduler_loop(bot: Bot):
     """Background task that checks schedules every minute."""
-    # Shared components for the scheduler
+    from app.joyreactor.client import JoyReactorClient
+    from app.queue.api_queue import APIQueue
+    from app.services.media_manager import MediaManager
+    from app.services.post_service import PostService
+    from app.services.delivery_service import DeliveryService
+    from app.services.scheduler_service import SchedulerService
+    from app.db.repositories.post_repository import PostRepository
+    from app.db.repositories.chat_repository import ChatRepository
+    from app.db.session import async_session
+    
     client = JoyReactorClient()
     queue = APIQueue()
     media_manager = MediaManager()
@@ -49,6 +50,11 @@ async def main():
     dp.include_router(next_router)
     dp.include_router(settings_router)
     dp.include_router(admin_router)
+    
+    # Bootstrap admins
+    async with async_session() as session:
+        from app.core.bootstrap import bootstrap_admins
+        await bootstrap_admins(session)
     
     # Start scheduler in the background
     asyncio.create_task(scheduler_loop(bot))
