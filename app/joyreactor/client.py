@@ -6,6 +6,7 @@ from .models import JRPost, JRTag
 from .queries import SEARCH_TAGS_QUERY, FETCH_POSTS_QUERY
 from .extractor import JoyReactorExtractor
 import httpx
+import base64
 import structlog
 
 logger = structlog.get_logger()
@@ -68,8 +69,23 @@ class JoyReactorClient:
     async def close(self):
         await self.client.aclose()
 
+    def _decode_global_id(self, global_id: str) -> str:
+        """
+        Converts a GraphQL global ID (base64) to a numeric ID.
+        Example: 'UG9zdDo0NDU5NzE=' -> '445971'
+        """
+        try:
+            decoded = base64.b64decode(global_id).decode('utf-8')
+            if ':' in decoded:
+                return decoded.split(':')[-1]
+            return decoded
+        except Exception as e:
+            logger.error("decode_global_id_failed", global_id=global_id, error=str(e))
+            return global_id
+
     async def get_post_html(self, post_id: str) -> Optional[str]:
-        url = f"{self.base_url}/post/{post_id}"
+        numeric_id = self._decode_global_id(post_id)
+        url = f"{self.base_url}/post/{numeric_id}"
         try:
             response = await self.client.get(url)
             response.raise_for_status()
