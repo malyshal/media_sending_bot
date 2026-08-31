@@ -16,8 +16,29 @@ from app.bot.handlers.next_handler import handle_next_request
 
 logger = structlog.get_logger()
 
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State
+from aiogram import Bot
+from app.bot.states import OnboardingStates, ChatSettingsStates
+from app.db.session import async_session
+from app.db.repositories.user_repository import UserRepository
+from app.db.repositories.chat_repository import ChatRepository
+from app.joyreactor.client import JoyReactorClient
+from app.services.post_service import PostService
+from app.queue.api_queue import APIQueue
+from app.core.config import settings
+import structlog
+from app.bot.handlers.next_handler import handle_next_request
+
+logger = structlog.get_logger()
+
 router = Router()
+# This will be replaced by a proper DI or singleton in a real app, 
+# but for now we maintain the existing structure while ensuring APIQueue usage.
 jr_client = JoyReactorClient()
+api_queue = APIQueue()
 
 async def get_post_button():
     return InlineKeyboardButton(text="▶️ Получить пост", callback_data="get_first_post")
@@ -91,14 +112,16 @@ async def find_tag_start(callback: CallbackQuery, state: FSMContext):
 async def process_tag_search(message: Message, state: FSMContext):
     query = message.text
     try:
-        tags = await jr_client.search_tags(query)
+        # Use APIQueue for tag search (TS Section 17)
+        tags = await api_queue.enqueue(jr_client.search_tags, query)
         if not tags:
             await message.answer("Ничего не найдено. Попробуйте другой запрос.")
             return
         
         kb_list = []
         for tag in tags[:10]: # Limit to 10 results
-            kb_list.append([InlineKeyboardButton(text=tag, callback_data=f"tag_select:{tag}")])
+            # Use tag.name as JRTag is now a dataclass
+            kb_list.append([InlineKeyboardButton(text=tag.name, callback_data=f"tag_select:{tag.name}")])
         
         kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
         await message.answer(f"Найдены следующие теги:\n{query}", reply_markup=kb)
@@ -135,6 +158,20 @@ async def select_tag(callback: CallbackQuery, state: FSMContext):
             reply_markup=kb
         )
         await state.clear()
+
+@router.callback_query(F.data == "get_first_post")
+async def get_first_post_handler(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    await callback.message.answer("Ищу подходящий пост...")
+    
+    from aiogram.types import Message
+    dummy_msg = Message(
+        message_id=callback.message.message_id,
+        chat=callback.message.chat,
+        from_user=callback.from_user,
+        text="/next"
+    )
+    await handle_next_request(dummy_msg, bot)
 
 @router.callback_query(F.data == "get_first_post")
 async def get_first_post_handler(callback: CallbackQuery, bot: Bot):

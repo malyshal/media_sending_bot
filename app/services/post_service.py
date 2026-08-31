@@ -16,7 +16,6 @@ class PostService:
 
     async def get_next_post_for_chat(self, chat_id: int, include_tags: List[str], exclude_tags: List[str]) -> Optional[Post]:
         # 1. Try to find a post in cache that fits tags and isn't sent
-        # To avoid heavy DB scans, we take a batch from cache and filter in Python or via optimized SQL
         candidate_posts = await self.repo.get_posts_by_tags(include_tags, exclude_tags, limit=50)
         
         for post in candidate_posts:
@@ -24,36 +23,52 @@ class PostService:
                 return post
         
         # 2. If no suitable post in cache, try to fetch new ones from API
-        # We use a default tag if include_tags is empty, or pick one from include_tags
-        search_tag = include_tags[0] if include_tags else "memes" 
+        # Process all include tags to support multiple tags (TS Section 16)
+        all_fetched_posts: List[JRPost] = []
         
-        try:
-            jr_posts = await self.queue.enqueue(
-                self.client.fetch_posts_by_tag, 
-                search_tag, 
-                priority=2 # Normal priority
-            )
-            
-            for jr_p in jr_posts:
-                # Map JRPost to DB Post
-                db_post = Post(
-                    id=jr_p.id,
-                    text=jr_p.text,
-                    media_url=jr_p.media_url,
-                    media_type=jr_p.media_type,
-                    tags=jr_p.tags,
-                    created_at=jr_p.created_at,
-                    updated_at=jr_p.created_at,
-                    raw_data=jr_p.raw_data
+        tags_to_fetch = include_tags if include_tags else ["memes"]
+        
+        for tag in tags_to_fetch:
+            try:
+                jr_posts = await self.queue.enqueue(
+                    self.client.fetch_posts_by_tag, 
+                    tag, 
+                    priority=2
                 )
-                await self.repo.save_post(db_post)
+                all_fetched_posts.extend(jr_posts)
+            except Exception as e:
+                logger.error("post_service_fetch_error", tag=tag, error=str(e))
+
+        if not all_fetched_posts:
+            return None
+
+        # Deduplicate by post ID (TS Section 16)
+        unique_posts = {}
+        for p in all_fetched_posts:
+            unique_posts[p.id] = p
+        
+        # Apply EXCLUDE and check if sent
+        for jr_p in unique_posts.values():
+            # Check if post contains any exclude tags
+            if any(ex_tag in jr_p.tags for ex_tag in exclude_tags):
+                continue
                 
-                if not await self.repo.is_post_sent(chat_id, db_post.id):
-                    return db_post
-                    
-        except Exception as e:
-            logger.error("post_service_fetch_error", error=str(e))
+            # Map JRPost to DB Post
+            db_post = Post(
+                id=jr_p.id,
+                text=jr_p.text,
+                media_url=jr_p.media_url,
+                media_type=jr_p.media_type,
+                tags=jr_p.tags,
+                created_at=jr_p.created_at,
+                updated_at=jr_p.created_at,
+                raw_data=jr_p.raw_data
+            )
+            await self.repo.save_post(db_post)
             
+            if not await self.repo.is_post_sent(chat_id, db_post.id):
+                return db_post
+                
         return None
 
     async def mark_post_sent(self, chat_id: int, post_id: int):
