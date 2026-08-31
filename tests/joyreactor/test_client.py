@@ -2,7 +2,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock
 from app.joyreactor.client import JoyReactorClient
-from app.joyreactor.models import JRPost, JRTag
+from app.joyreactor.extractor import JoyReactorExtractor
 from httpx import Response, Request
 
 @pytest.fixture
@@ -10,6 +10,56 @@ def mock_client():
     client = JoyReactorClient()
     client.client = AsyncMock()
     return client
+
+@pytest.fixture
+def extractor():
+    return JoyReactorExtractor("https://joyreactor.cc")
+
+@pytest.mark.asyncio
+async def test_decode_global_id(mock_client):
+    # Test global ID conversion
+    assert mock_client._decode_global_id("UG9zdDo0NDU5NzE=") == "445971"
+    assert mock_client._decode_global_id("445971") == "445971"
+    assert mock_client._decode_global_id("InvalidID") == "InvalidID"
+
+@pytest.mark.asyncio
+async def test_extract_media_url_image(extractor):
+    # Fixture for post 445971: contains ad images and the real post image
+    html = """
+    <html>
+        <body>
+            <img src="https://mc.yandex.ru/watch/98649933">
+            <img src="/avatar/user123.jpg">
+            <img src="https://img2.joyreactor.cc/pics/post/тюлень-интелегент-песочница-359574.jpeg">
+            <img src="/service/icon.png">
+        </body>
+    </html>
+    """
+    url = await extractor.extract_media_url(html, "445971", is_video=False)
+    assert url == "https://img2.joyreactor.cc/pics/post/тюлень-интелегент-песочница-359574.jpeg"
+    assert "mc.yandex.ru" not in url
+
+@pytest.mark.asyncio
+async def test_extract_media_url_video(extractor):
+    # Fixture for video post
+    html = """
+    <html>
+        <body>
+            <video>
+                <source src="/images/videowithsound.mp4" type="video/mp4">
+            </video>
+            <img src="https://mc.yandex.ru/watch/123">
+        </body>
+    </html>
+    """
+    url = await extractor.extract_media_url(html, "445971", is_video=True)
+    assert url == "https://joyreactor.cc/images/videowithsound.mp4"
+
+@pytest.mark.asyncio
+async def test_extract_media_url_not_found(extractor):
+    html = "<html><body><img src='https://mc.yandex.ru/watch/123'></body></html>"
+    url = await extractor.extract_media_url(html, "445971", is_video=False)
+    assert url is None
 
 @pytest.mark.asyncio
 async def test_execute_graphql_success(mock_client):
@@ -36,7 +86,6 @@ async def test_execute_graphql_errors(mock_client):
 async def test_execute_http_403(mock_client):
     mock_response = MagicMock(spec=Response)
     mock_response.status_code = 403
-    # Mock raise_for_status to actually raise
     import httpx
     mock_response.raise_for_status.side_effect = httpx.HTTPStatusError("403 Forbidden", request=Request("POST", "url"), response=mock_response)
     mock_client.client.post.return_value = mock_response
