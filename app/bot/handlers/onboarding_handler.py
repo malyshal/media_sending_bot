@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
-from aiogram.Bot import Bot
+from aiogram import Bot
 from app.bot.states import OnboardingStates, ChatSettingsStates
 from app.db.session import async_session
 from app.db.repositories.user_repository import UserRepository
