@@ -18,7 +18,7 @@ class ChatConfig(Base):
     
     # Scheduling
     # We can store the schedule as a cron string or a JSON list of times
-    schedule: Mapped[str] = mapped_column(String, nullable=False) 
+    schedule: Mapped[str] = mapped_column(String, nullable=True) 
     timezone: Mapped[str] = mapped_column(String, default="UTC")
     
     # Tracking

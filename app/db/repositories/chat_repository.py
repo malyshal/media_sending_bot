@@ -20,7 +20,7 @@ class ChatRepository:
                 max_posts_per_batch=3,
                 include_tags=[],
                 exclude_tags=[],
-                schedule="0 10 * * *", # Default 10:00 AM
+                schedule=None,
                 timezone="Europe/Moscow"
             )
             self.session.add(config)
