@@ -3,11 +3,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from app.core.config import settings
 from .models import JRPost, JRTag
-from .queries import SEARCH_TAGS_QUERY, FETCH_POSTS_QUERY
+from .queries import SEARCH_TAGS_QUERY, FETCH_POSTS_QUERY, GET_POST_QUERY
 from .extractor import JoyReactorExtractor
+from .rate_limiter import RateLimiter
 import httpx
 import base64
 import structlog
+import asyncio
 
 logger = structlog.get_logger()
 
@@ -16,6 +18,7 @@ class JoyReactorClient:
         self.api_url = settings.joyreactor_api_url
         self.base_url = settings.joyreactor_base_url
         self.extractor = JoyReactorExtractor(self.base_url)
+        self.rate_limiter = RateLimiter(min_interval=2.5)
         
         self.headers = {
             "Origin": self.base_url,
@@ -41,39 +44,50 @@ class JoyReactorClient:
     async def execute(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = {"query": query, "variables": variables or {}}
         
-        try:
-            response = await self.client.post(self.api_url, json=payload)
+        retries = 0
+        max_retries = 3
+        
+        while retries <= max_retries:
+            await self.rate_limiter.wait()
             
-            if response.status_code == 403:
-                logger.error("joyreactor_api_forbidden", status_code=403, url=self.api_url)
-                raise httpx.HTTPStatusError("JoyReactor API returned 403 Forbidden", request=response.request, response=response)
+            try:
+                response = await self.client.post(self.api_url, json=payload)
                 
-            response.raise_for_status()
-            data = response.json()
-            
-            if "errors" in data:
-                logger.error("graphql_errors", errors=data["errors"], query=query[:100])
-                raise Exception(f"GraphQL errors: {data['errors']}")
+                if response.status_code == 429:
+                    logger.warning("rate_limit_exceeded", status_code=429, retry=retries)
+                    await asyncio.sleep(15)
+                    retries += 1
+                    continue
                 
-            return data.get("data", {})
-        except httpx.TimeoutException as e:
-            logger.error("joyreactor_api_timeout", error=str(e))
-            raise e
-        except httpx.HTTPStatusError as e:
-            logger.error("http_error", status_code=e.response.status_code)
-            raise e
-        except Exception as e:
-            logger.error("request_failed", error=str(e))
-            raise e
+                if response.status_code == 403:
+                    logger.error("joyreactor_api_forbidden", status_code=403, url=self.api_url)
+                    raise httpx.HTTPStatusError("JoyReactor API returned 403 Forbidden", request=response.request, response=response)
+                    
+                response.raise_for_status()
+                data = response.json()
+                
+                if "errors" in data:
+                    logger.error("graphql_errors", errors=data["errors"], query=query[:100])
+                    raise Exception(f"GraphQL errors: {data['errors']}")
+                    
+                return data.get("data", {})
+                
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                logger.error("request_error", error=str(e), retry=retries)
+                retries += 1
+                if retries > max_retries:
+                    raise e
+                await asyncio.sleep(2 ** retries)
+            except Exception as e:
+                logger.error("unexpected_error", error=str(e))
+                raise e
+                
+        raise Exception("Max retries exceeded")
 
     async def close(self):
         await self.client.aclose()
 
     def _decode_global_id(self, global_id: str) -> str:
-        """
-        Converts a GraphQL global ID (base64) to a numeric ID.
-        Example: 'UG9zdDo0NDU5NzE=' -> '445971'
-        """
         try:
             decoded = base64.b64decode(global_id).decode('utf-8')
             if ':' in decoded:
@@ -83,24 +97,35 @@ class JoyReactorClient:
             logger.error("decode_global_id_failed", global_id=global_id, error=str(e))
             return global_id
 
-    async def get_post_html(self, post_id: str) -> Optional[str]:
-        numeric_id = self._decode_global_id(post_id)
-        url = f"{self.base_url}/post/{numeric_id}"
-        try:
-            response = await self.client.get(url)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            logger.error("fetch_post_html_failed", post_id=post_id, error=str(e))
+    async def fetch_post(self, post_id: str) -> Optional[JRPost]:
+        """
+        Fetches a single post and normalizes it.
+        """
+        data = await self.execute(GET_POST_QUERY, {"id": post_id})
+        post_data = data.get("post")
+        if not post_data:
             return None
-
-    def _normalize_media_type(self, api_type: str) -> str:
-        api_type = api_type.lower()
-        if any(ext in api_type for ext in ["jpg", "jpeg", "png", "webp"]):
-            return "image"
-        if any(ext in api_type for ext in ["gif", "mp4", "webm"]):
-            return "video"
-        return "image" # Default
+            
+        # Note: slug should ideally be retrieved from GraphQL if possible, 
+        # or by making a quick HTML request to get the URL.
+        # For now, we use a placeholder "post" to satisfy the URL builder.
+        slug = "post" 
+        
+        content = self.extractor.normalize_post(
+            post_id=post_data["id"],
+            text=post_data.get("text"),
+            attributes=post_data.get("attributes", []),
+            slug=slug
+        )
+        
+        return JRPost(
+            id=post_data["id"],
+            text=post_data.get("text"),
+            content=content,
+            tags=[pt["tag"]["name"] for pt in post_data.get("postTags", [])],
+            created_at=datetime.fromisoformat(post_data["createdAt"]),
+            raw_data=post_data
+        )
 
     async def fetch_posts_by_tag(self, tag_name: str, page: int = 1) -> List[JRPost]:
         variables = {"tagName": tag_name, "page": page}
@@ -109,26 +134,9 @@ class JoyReactorClient:
         posts_data = data.get("tag", {}).get("postPager", {}).get("posts", [])
         results = []
         for p in posts_data:
-            attributes = p.get("attributes", [])
-            media_url, media_type = "", "UNKNOWN"
-            
-            for attr in attributes:
-                if attr and "image" in attr:
-                    img = attr["image"]
-                    media_type_val = "video" if img.get("hasVideo") else img.get("type", "UNKNOWN")
-                    media_url = f"resolve://{p['id']}" 
-                    media_type = media_type_val
-                    break 
-            
-            results.append(JRPost(
-                id=str(p["id"]),
-                text=p.get("text"),
-                media_url=media_url,
-                media_type=self._normalize_media_type(media_type),
-                tags=[pt["tag"]["name"] for pt in p.get("postTags", [])],
-                created_at=datetime.fromisoformat(p["createdAt"]),
-                raw_data=p
-            ))
+            post = await self.fetch_post(p["id"])
+            if post:
+                results.append(post)
         return results
 
     async def search_tags(self, mask: str) -> List[JRTag]:

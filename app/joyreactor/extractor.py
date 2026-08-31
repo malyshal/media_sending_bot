@@ -1,69 +1,104 @@
-from bs4 import BeautifulSoup
+import re
 import structlog
-from typing import Optional
+from typing import List, Optional, Dict, Any
 from urllib.parse import urljoin
+from .models import JRContentItem, JRMedia
 
 logger = structlog.get_logger()
 
 class JoyReactorExtractor:
     """
-    Extracts actual media URLs from JoyReactor post HTML pages.
-    Follows the principle of using GraphQL for metadata and HTML for the final URL.
+    Handles normalization of JoyReactor posts by mapping GraphQL data
+    and text placeholders to a sequence of content items.
     """
     
     def __init__(self, base_url: str):
         self.base_url = base_url
 
-    async def extract_media_url(self, html_content: str, post_id: str, is_video: bool = False) -> Optional[str]:
+    def normalize_post(self, post_id: str, text: Optional[str], attributes: List[Dict[str, Any]], slug: str = "") -> List[JRContentItem]:
         """
-        Parses post HTML to find the actual media URL.
+        Transforms raw GraphQL data into a normalized list of content items.
+        Implements the logic from TS.MD Section 12.
         """
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+        if not text:
+            text = ""
+
+        # 1. Extract pictures and their properties
+        pictures = []
+        for idx, attr in enumerate(attributes):
+            if attr.get("__typename") == "PostAttributePicture":
+                img_data = attr.get("image", {})
+                pic_id = attr.get("id")
+                
+                pictures.append({
+                    "attribute_index": idx,
+                    "picture_index": len(pictures) + 1,
+                    "id": pic_id,
+                    "has_video": img_data.get("hasVideo", False),
+                    "type": img_data.get("type", "UNKNOWN")
+                })
+
+        # 2. Parse text for placeholders &attribute_insert_N&
+        # This splits the text while keeping the delimiters
+        parts = re.split(r'(&attribute_insert_(\d+)&)', text)
+        
+        # re.split with capturing groups returns: [text, delimiter, group1, text, delimiter, group1, ...]
+        normalized_content = []
+        i = 0
+        while i < len(parts):
+            part = parts[i]
+            if not part:
+                i += 1
+                continue
             
-            if is_video:
-                # Video logic: search for <video> and <source> tags
-                # Prefer <source> inside <video> as it often contains the actual file
-                video_tag = soup.find('video')
-                if video_tag:
-                    source_tag = video_tag.find('source')
-                    if source_tag and source_tag.get('src'):
-                        return urljoin(self.base_url, source_tag['src'])
-                    if video_tag.get('src'):
-                        return urljoin(self.base_url, video_tag['src'])
-                
-                # Fallback to any source tag in the page
-                source_tag = soup.find('source')
-                if source_tag and source_tag.get('src'):
-                    return urljoin(self.base_url, source_tag['src'])
-            else:
-                # Image logic: search for the main post image
-                # Prefer specific post image containers/IDs
-                img_tag = soup.find('img', class_='post_image') or soup.find('img', id='post_image')
-                
-                if not img_tag:
-                    # Filtered search: find all imgs and pick the first one that looks like a post image
-                    all_imgs = soup.find_all('img', src=True)
-                    for img in all_imgs:
-                        src = img['src']
-                        # Exclude known ads/service images
-                        if any(x in src for x in ['mc.yandex.ru', '/avatar/', '/service/', '/ads/']):
-                            continue
-                        # Prefer post pics
-                        if 'img2.joyreactor.cc/pics/post/' in src or 'img.joyreactor.cc/pics/post/' in src:
-                            img_tag = img
-                            break
-                        # If we found a reasonable image that isn't an ad, it's a candidate
-                        img_tag = img # Tentative
+            if part.startswith("&attribute_insert_") and part.endswith("&"):
+                # This is a placeholder
+                try:
+                    # The number is in the next element of the parts list
+                    pic_idx = int(parts[i+1])
                     
-                if img_tag and img_tag.get('src'):
-                    url = img_tag['src']
-                    # Convert thumbnail/preview URLs to full size
-                    if '/preview/' in url:
-                        url = url.replace('/preview/', '/full/')
-                    return urljoin(self.base_url, url)
-            
-            return None
-        except Exception as e:
-            logger.error("extraction_failed", post_id=post_id, error=str(e))
-            return None
+                    # Find the picture with this picture_index
+                    pic = next((p for p in pictures if p["picture_index"] == pic_idx), None)
+                    
+                    if pic:
+                        normalized_content.append(JRContentItem(
+                            type="media",
+                            media=self._build_media_object(pic, slug)
+                        ))
+                    else:
+                        logger.error("media_not_found", post_id=post_id, picture_index=pic_idx)
+                except (IndexError, ValueError):
+                    logger.error("invalid_placeholder", post_id=post_id, part=part)
+                
+                i += 2 # Skip the delimiter and the captured number
+            else:
+                # This is regular text
+                normalized_content.append(JRContentItem(
+                    type="text",
+                    content=part
+                ))
+                i += 1
+
+        return normalized_content
+
+    def _build_media_object(self, pic: Dict[str, Any], slug: str) -> JRMedia:
+        """
+        Constructs the final JRMedia object with URLs based on TS.MD Section 6 & 7.
+        """
+        numeric_id = pic["id"]
+        host = "img.joyreactor.cc" 
+        
+        if pic["has_video"]:
+            return JRMedia(
+                type="video",
+                id=int(numeric_id),
+                url=f"https://{host}/pics/post/webm/{slug}-{numeric_id}.webm",
+                preview_url=f"https://{host}/pics/post/static/{slug}-{numeric_id}.jpeg"
+            )
+        else:
+            ext = "jpg" 
+            return JRMedia(
+                type="photo",
+                id=int(numeric_id),
+                url=f"https://{host}/pics/post/{slug}-{numeric_id}.{ext}"
+            )

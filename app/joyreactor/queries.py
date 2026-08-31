@@ -49,3 +49,36 @@ query GetPostsByTag($tagName: String!, $page: Int) {
   }
 }
 """
+
+# Fetch a single post by its global ID
+GET_POST_QUERY = """
+query GetPost($id: ID!) {
+  post(id: $id) {
+    id
+    text
+    createdAt
+    nsfw
+    unsafe
+    postTags {
+      tag {
+        id
+        name
+      }
+    }
+    attributes {
+      __typename
+      ... on PostAttributePicture {
+        id
+        type
+        image {
+          id
+          type
+          hasVideo
+          width
+          height
+        }
+      }
+    }
+  }
+}
+"""
