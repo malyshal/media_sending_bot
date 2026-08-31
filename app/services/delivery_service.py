@@ -10,8 +10,6 @@ from sqlalchemy import delete, and_
 
 logger = structlog.get_logger()
 
-logger = structlog.get_logger()
-
 class DeliveryService:
     def __init__(self, bot: Bot, post_service: PostService, media_manager: MediaManager):
         self.bot = bot
