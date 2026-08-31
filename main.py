@@ -17,9 +17,8 @@ from app.core.bootstrap import bootstrap_admins
 
 logger = structlog.get_logger()
 
-async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
+async def scheduler_loop(bot: Bot, queue: 'APIQueue', client: 'JoyReactorClient'):
     """Background task that checks schedules every minute."""
-    from app.joyreactor.client import JoyReactorClient
     from app.services.media_manager import MediaManager
     from app.services.post_service import PostService
     from app.services.delivery_service import DeliveryService
@@ -27,7 +26,6 @@ async def scheduler_loop(bot: Bot, queue: 'APIQueue'):
     from app.db.repositories.post_repository import PostRepository
     from app.db.repositories.chat_repository import ChatRepository
     
-    client = JoyReactorClient()
     media_manager = MediaManager()
     
     async with async_session() as session:
@@ -50,16 +48,17 @@ async def main():
     
     # 1. Database Initialization
     async with engine.begin() as conn:
-        # Using run_sync to call synchronous Base.metadata.create_all
         await conn.run_sync(Base.metadata.create_all)
     
     async with async_session() as session:
-        # Bootstrap admins from .env
         await bootstrap_admins(session)
     
-    # 2. Global API Queue (DI approach)
+    # 2. Global Singleton Services
     from app.queue.api_queue import APIQueue
+    from app.joyreactor.client import JoyReactorClient
+    
     global_queue = APIQueue(interval=settings.api_request_interval)
+    global_jr_client = JoyReactorClient()
     
     bot = Bot(token=settings.bot_token)
     
@@ -69,6 +68,12 @@ async def main():
     
     dp = Dispatcher(storage=storage)
     
+    # Pass global services to handlers via dp.workflow_data
+    dp.workflow_data.update({
+        "api_queue": global_queue,
+        "jr_client": global_jr_client
+    })
+    
     dp.include_router(onboarding_router)
     dp.include_router(next_router)
     dp.include_router(settings_router)
@@ -76,13 +81,14 @@ async def main():
     dp.include_router(help_router)
     
     # Start background tasks
-    asyncio.create_task(scheduler_loop(bot, global_queue))
+    asyncio.create_task(scheduler_loop(bot, global_queue, global_jr_client))
     asyncio.create_task(cleanup_worker())
     
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+        await global_jr_client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

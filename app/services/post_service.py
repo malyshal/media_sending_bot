@@ -14,6 +14,13 @@ class PostService:
         self.queue = queue
         self.repo = repo
 
+    async def get_first_post_for_onboarding(self, chat_id: int, include_tags: List[str], exclude_tags: List[str]) -> Optional[Post]:
+        """
+        Logic for obtaining the first post during onboarding.
+        Shared with get_next_post_for_chat but logically isolated.
+        """
+        return await self.get_next_post_for_chat(chat_id, include_tags, exclude_tags)
+
     async def get_next_post_for_chat(self, chat_id: int, include_tags: List[str], exclude_tags: List[str]) -> Optional[Post]:
         # 1. Try to find a post in cache that fits tags and isn't sent
         candidate_posts = await self.repo.get_posts_by_tags(include_tags, exclude_tags, limit=50)

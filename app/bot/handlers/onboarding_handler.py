@@ -16,29 +16,7 @@ from app.bot.handlers.next_handler import handle_next_request
 
 logger = structlog.get_logger()
 
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State
-from aiogram import Bot
-from app.bot.states import OnboardingStates, ChatSettingsStates
-from app.db.session import async_session
-from app.db.repositories.user_repository import UserRepository
-from app.db.repositories.chat_repository import ChatRepository
-from app.joyreactor.client import JoyReactorClient
-from app.services.post_service import PostService
-from app.queue.api_queue import APIQueue
-from app.core.config import settings
-import structlog
-from app.bot.handlers.next_handler import handle_next_request
-
-logger = structlog.get_logger()
-
 router = Router()
-# This will be replaced by a proper DI or singleton in a real app, 
-# but for now we maintain the existing structure while ensuring APIQueue usage.
-jr_client = JoyReactorClient()
-api_queue = APIQueue()
 
 async def get_post_button():
     return InlineKeyboardButton(text="▶️ Получить пост", callback_data="get_first_post")
@@ -109,18 +87,17 @@ async def find_tag_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(OnboardingStates.waiting_for_first_tag)
 
 @router.message(OnboardingStates.waiting_for_first_tag)
-async def process_tag_search(message: Message, state: FSMContext):
+async def process_tag_search(message: Message, state: FSMContext, api_queue: APIQueue, jr_client: JoyReactorClient):
     query = message.text
     try:
-        # Use APIQueue for tag search (TS Section 17)
+        # Use DI passed APIQueue
         tags = await api_queue.enqueue(jr_client.search_tags, query)
         if not tags:
             await message.answer("Ничего не найдено. Попробуйте другой запрос.")
             return
         
         kb_list = []
-        for tag in tags[:10]: # Limit to 10 results
-            # Use tag.name as JRTag is now a dataclass
+        for tag in tags[:10]:
             kb_list.append([InlineKeyboardButton(text=tag.name, callback_data=f"tag_select:{tag.name}")])
         
         kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
@@ -139,10 +116,8 @@ async def select_tag(callback: CallbackQuery, state: FSMContext):
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(callback.message.chat.id)
         
-        # Avoid duplicates
         if tag not in config.include_tags:
             config.include_tags.append(tag)
-
             await chat_repo.update_tags(callback.message.chat.id, config.include_tags, config.exclude_tags)
         
         await callback.message.answer(f"✅ Тег «{tag}» добавлен в список предпочтительных.")
@@ -160,30 +135,27 @@ async def select_tag(callback: CallbackQuery, state: FSMContext):
         await state.clear()
 
 @router.callback_query(F.data == "get_first_post")
-async def get_first_post_handler(callback: CallbackQuery, bot: Bot):
+async def get_first_post_handler(callback: CallbackQuery, bot: Bot, post_service: PostService):
     await callback.answer()
     await callback.message.answer("Ищу подходящий пост...")
     
-    from aiogram.types import Message
-    dummy_msg = Message(
-        message_id=callback.message.message_id,
-        chat=callback.message.chat,
-        from_user=callback.from_user,
-        text="/next"
-    )
-    await handle_next_request(dummy_msg, bot)
-
-@router.callback_query(F.data == "get_first_post")
-async def get_first_post_handler(callback: CallbackQuery, bot: Bot):
-    await callback.answer()
-    await callback.message.answer("Ищу подходящий пост...")
-
-    from aiogram.types import Message
-    dummy_msg = Message(
-        message_id=callback.message.message_id,
-        chat=callback.message.chat,
-        from_user=callback.from_user,
-        text="/next"
-    )
-    await handle_next_request(dummy_msg, bot)
-
+    async with async_session() as session:
+        from app.db.repositories.chat_repository import ChatRepository
+        config = await ChatRepository(session).get_config(callback.message.chat.id)
+        
+        from app.services.delivery_service import DeliveryService
+        from app.services.media_manager import MediaManager
+        
+        media_manager = MediaManager()
+        delivery = DeliveryService(bot, post_service, media_manager)
+        
+        post = await post_service.get_first_post_for_onboarding(
+            callback.message.chat.id, 
+            config.include_tags, 
+            config.exclude_tags
+        )
+        
+        if post:
+            await delivery.send_post(callback.message.chat.id, post)
+        else:
+            await callback.message.answer("К сожалению, не удалось найти подходящий пост прямо сейчас. Попробуйте позже!")

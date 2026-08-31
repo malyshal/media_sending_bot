@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     redis_url: str
     
     # JoyReactor API Settings
-    joyreactor_api_key: str | None = None
     joyreactor_base_url: str = "https://joyreactor.cc"
     joyreactor_api_url: str = "https://api.joyreactor.com/graphql"
     api_request_interval: float = 2.0
