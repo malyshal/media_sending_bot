@@ -10,7 +10,9 @@ router = Router()
 
 @router.message(Command("next"))
 async def cmd_next(message: types.Message, bot: Bot):
+    return await handle_next_request(message, bot)
 
+async def handle_next_request(message: types.Message, bot: Bot):
     chat_id = message.chat.id
     logger.info("cmd_next_received", chat_id=chat_id)
     

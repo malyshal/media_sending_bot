@@ -1,11 +1,15 @@
 import asyncio
 import structlog
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.redis import RedisStorage
+from redis.asyncio import Redis
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.bot.handlers.next_handler import router as next_router
 from app.bot.handlers.settings_handler import router as settings_router
 from app.bot.handlers.admin_handler import router as admin_router
+from app.bot.handlers.onboarding_handler import router as onboarding_router
+from app.bot.handlers.help_handler import router as help_router
 from app.core.cleanup import cleanup_worker
 from app.db.session import async_session, engine
 from app.db.models.base import Base
@@ -58,11 +62,18 @@ async def main():
     global_queue = APIQueue(interval=settings.api_request_interval)
     
     bot = Bot(token=settings.bot_token)
-    dp = Dispatcher()
     
+    # 3. Redis FSM Storage
+    redis = Redis.from_url(settings.redis_url)
+    storage = RedisStorage(redis)
+    
+    dp = Dispatcher(storage=storage)
+    
+    dp.include_router(onboarding_router)
     dp.include_router(next_router)
     dp.include_router(settings_router)
     dp.include_router(admin_router)
+    dp.include_router(help_router)
     
     # Start background tasks
     asyncio.create_task(scheduler_loop(bot, global_queue))
