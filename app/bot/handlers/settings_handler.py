@@ -42,7 +42,7 @@ async def cmd_settings(message: types.Message):
         await message.answer(text, parse_mode="Markdown", reply_markup=kb.as_markup())
 
 @router.message(Command("search_tags"))
-async def cmd_search_tags(message: types.Message, state: FSMContext):
+async def cmd_search_tags(message: types.Message, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     if not message.text or len(message.text.split()) < 2:
         await message.answer("Используйте: `/search_tags <запрос>`")
         return
@@ -51,14 +51,12 @@ async def cmd_search_tags(message: types.Message, state: FSMContext):
     await state.set_state(ChatSettingsStates.waiting_for_tag_search)
     await state.update_data(tag_query=query)
     
-    await process_tag_search(message, query, state)
+    await process_tag_search(message, query, state, api_queue, jr_client)
 
-async def process_tag_search(message: types.Message, query: str, state: FSMContext):
+async def process_tag_search(message: types.Message, query: str, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     async with async_session() as session:
-        client = JoyReactorClient()
-        queue = APIQueue()
         try:
-            tags = await queue.enqueue(client.search_tags, query, priority=1)
+            tags = await api_queue.enqueue(jr_client.search_tags, query, priority=1)
             if not tags:
                 await message.answer("Теги не найдены 😕")
                 return
@@ -72,8 +70,6 @@ async def process_tag_search(message: types.Message, query: str, state: FSMConte
         except Exception as e:
             logger.error("tag_search_failed", error=str(e))
             await message.answer("Произошла ошибка при поиске тегов.")
-        finally:
-            await client.close()
 
 @router.callback_query(F.data.startswith("tag_select:"))
 async def cb_tag_selected(callback: types.CallbackQuery, state: FSMContext):

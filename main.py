@@ -44,7 +44,7 @@ async def scheduler_loop(bot: Bot, queue: 'APIQueue', client: 'JoyReactorClient'
 
 async def main():
     setup_logging()
-    logger.info("bot_starting", token=settings.bot_token[:5] + "...")
+    logger.info("bot_starting")
     
     # 1. Database Initialization
     async with engine.begin() as conn:
@@ -89,6 +89,7 @@ async def main():
     finally:
         await bot.session.close()
         await global_jr_client.close()
+        await global_queue.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())

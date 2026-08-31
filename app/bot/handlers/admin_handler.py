@@ -45,7 +45,7 @@ async def cmd_stats(message: types.Message):
         await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("force_send"))
-async def cmd_force_send(message: types.Message, bot: Bot):
+async def cmd_force_send(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     if not await admin_filter(message):
         return
 
@@ -54,14 +54,10 @@ async def cmd_force_send(message: types.Message, bot: Bot):
     from app.services.delivery_service import DeliveryService
     from app.services.post_service import PostService
     from app.services.media_manager import MediaManager
-    from app.queue.api_queue import APIQueue
-    from app.joyreactor.client import JoyReactorClient
-    
+
     async with async_session() as session:
-        client = JoyReactorClient()
-        queue = APIQueue()
         repo = PostRepository(session)
-        post_service = PostService(client, queue, repo)
+        post_service = PostService(jr_client, api_queue, repo)
         media_manager = MediaManager()
         delivery_service = DeliveryService(bot, post_service, media_manager)
         
@@ -72,5 +68,3 @@ async def cmd_force_send(message: types.Message, bot: Bot):
             await message.answer("🚀 Принудительная отправка выполнена!")
         else:
             await message.answer("❌ Не удалось найти пост для отправки.")
-        
-        await client.close()

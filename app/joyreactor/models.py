@@ -4,7 +4,7 @@ from datetime import datetime
 
 @dataclass
 class JRPost:
-    id: int
+    id: str
     text: Optional[str]
     media_url: str
     media_type: str

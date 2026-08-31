@@ -7,7 +7,6 @@ from app.bot.states import OnboardingStates, ChatSettingsStates
 from app.db.session import async_session
 from app.db.repositories.user_repository import UserRepository
 from app.db.repositories.chat_repository import ChatRepository
-from app.joyreactor.client import JoyReactorClient
 from app.services.post_service import PostService
 from app.queue.api_queue import APIQueue
 from app.core.config import settings
@@ -87,7 +86,7 @@ async def find_tag_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(OnboardingStates.waiting_for_first_tag)
 
 @router.message(OnboardingStates.waiting_for_first_tag)
-async def process_tag_search(message: Message, state: FSMContext, api_queue: APIQueue, jr_client: JoyReactorClient):
+async def process_tag_search(message: Message, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     query = message.text
     try:
         # Use DI passed APIQueue

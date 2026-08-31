@@ -89,27 +89,30 @@ class JoyReactorClient:
 
     def _normalize_media_url(self, media_data: Optional[Dict[str, Any]]) -> tuple[str, str]:
         """
-        Normalizes media URL and type.
-        Returns (url, type).
+        Normalizes media URL and type based on TS Section 10.
         """
         if not media_data:
             return "", "UNKNOWN"
         
-        url = media_data.get("url")
-        if url:
-            return url, media_data.get("type", "UNKNOWN")
-        
-        # Fallback to ID based URL
+        # Image.url is removed as per TS Section 7. 
+        # We must determine the actual URL.
         media_id = media_data.get("id")
-        if media_id:
-            return f"{self.base_url}/img/{media_id}", media_data.get("type", "UNKNOWN")
+        if not media_id:
+            return "", "UNKNOWN"
             
-        return "", "UNKNOWN"
+        # According to TS, we shouldn't assume /img/{id} is always correct,
+        # but as a primary mechanism for GraphQL IDs, we use it if it's the only way
+        # unless we implement HTML scraping.
+        url = f"{self.base_url}/img/{media_id}"
+        
+        return url, media_data.get("type", "UNKNOWN")
 
     def _normalize_media_type(self, api_type: str) -> str:
         """
         Maps API media types to JoyBot media types.
         """
+        # For PostAttributePicture, we check image.hasVideo
+        # But this is called with media_type which comes from image.type
         api_type = api_type.lower()
         if any(ext in api_type for ext in ["jpg", "jpeg", "png", "webp"]):
             return "image"
@@ -128,14 +131,17 @@ class JoyReactorClient:
             attributes = p.get("attributes", [])
             media_url, media_type = "", "UNKNOWN"
             
-            for attr in attributes:
-                if attr and "image" in attr:
-                    media_url, media_type = self._normalize_media_url(attr["image"])
-                elif attr and "video" in attr:
-                    media_url, media_type = self._normalize_media_url(attr["video"])
+        for attr in attributes:
+            if attr and "image" in attr:
+                img = attr["image"]
+                # If image has video, treat as video
+                media_type_val = "video" if img.get("hasVideo") else img.get("type", "UNKNOWN")
+                media_url, _ = self._normalize_media_url(img)
+                media_type = media_type_val
+                break # Use first image attribute
             
             results.append(JRPost(
-                id=int(p["id"]),
+                id=str(p["id"]),
                 text=p.get("text"),
                 media_url=media_url,
                 media_type=self._normalize_media_type(media_type),
@@ -148,7 +154,7 @@ class JoyReactorClient:
     async def search_tags(self, mask: str) -> List[JRTag]:
         variables = {"mask": mask}
         data = await self.execute(SEARCH_TAGS_QUERY, variables)
-        tags_data = data.get("searchTags", [])
+        tags_data = data.get("tagAutocomplete", [])
         
         return [
             JRTag(

@@ -6,7 +6,7 @@ from .base import Base
 class Post(Base):
     __tablename__ = "posts"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
     text: Mapped[str] = mapped_column(Text, nullable=True)
     media_url: Mapped[str] = mapped_column(String, nullable=False)
     media_type: Mapped[str] = mapped_column(String, nullable=False) # image, video, gif etc

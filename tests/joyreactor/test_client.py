@@ -56,8 +56,8 @@ async def test_search_tags_parsing(mock_client):
     mock_response.status_code = 200
     mock_response.json.return_value = {
         "data": {
-            "searchTags": [
-                {"id": "1", "name": "test_tag", "count": 100, "nsfw": False, "unsafe": False}
+            "tagAutocomplete": [
+                {"id": "VGFnOjM0Njc=", "name": "test_tag", "count": 100, "nsfw": False, "unsafe": False}
             ]
         }
     }
@@ -66,4 +66,4 @@ async def test_search_tags_parsing(mock_client):
     tags = await mock_client.search_tags("test")
     assert len(tags) == 1
     assert tags[0].name == "test_tag"
-    assert tags[0].id == "1"
+    assert tags[0].id == "VGFnOjM0Njc="

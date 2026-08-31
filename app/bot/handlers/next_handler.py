@@ -9,10 +9,10 @@ logger = structlog.get_logger()
 router = Router()
 
 @router.message(Command("next"))
-async def cmd_next(message: types.Message, bot: Bot):
-    return await handle_next_request(message, bot)
+async def cmd_next(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+    return await handle_next_request(message, bot, api_queue, jr_client)
 
-async def handle_next_request(message: types.Message, bot: Bot):
+async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     chat_id = message.chat.id
     logger.info("cmd_next_received", chat_id=chat_id)
     
@@ -21,15 +21,11 @@ async def handle_next_request(message: types.Message, bot: Bot):
         from app.services.media_manager import MediaManager
         from app.db.repositories.post_repository import PostRepository
         from app.db.repositories.chat_repository import ChatRepository
-        from app.queue.api_queue import APIQueue
-        from app.joyreactor.client import JoyReactorClient
         
         # Initialize components
-        client = JoyReactorClient()
-        queue = APIQueue()
         repo = PostRepository(session)
         chat_repo = ChatRepository(session)
-        post_service = PostService(client, queue, repo)
+        post_service = PostService(jr_client, api_queue, repo)
         media_manager = MediaManager()
         delivery_service = DeliveryService(bot, post_service, media_manager)
         
@@ -44,5 +40,3 @@ async def handle_next_request(message: types.Message, bot: Bot):
         
         if not res:
             await message.answer("No new posts found for your filters right now! 😢")
-        
-        await client.close()

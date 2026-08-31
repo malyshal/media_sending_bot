@@ -1,11 +1,9 @@
 # GraphQL Queries for JoyReactor
 
 # Search tags using the current working API schema
-# Based on gallery-dl: uses the tag page query to find related tags or specific autocomplete if available
-# Since tagAutocomplete is deprecated, we use a query that returns tag info.
 SEARCH_TAGS_QUERY = """
 query SearchTags($mask: String!) {
-  searchTags(mask: $mask) {
+  tagAutocomplete(mask: $mask) {
     id
     name
     count
@@ -16,11 +14,10 @@ query SearchTags($mask: String!) {
 """
 
 # Fetch posts for a specific tag
-# Updated to match actual API schema
 FETCH_POSTS_QUERY = """
 query GetPostsByTag($tagName: String!, $page: Int) {
   tag(name: $tagName) {
-    postPager(type: NEW) {
+    postPager {
       posts(page: $page) {
         id
         text
@@ -29,15 +26,10 @@ query GetPostsByTag($tagName: String!, $page: Int) {
           ... on PostAttributePicture {
             image {
               id
-              url
               type
-            }
-          }
-          ... on PostAttributeVideo {
-            video {
-              id
-              url
-              type
+              hasVideo
+              width
+              height
             }
           }
         }
