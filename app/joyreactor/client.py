@@ -3,27 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from app.core.config import settings
 from .models import JRPost, JRTag
-import httpx
-import structlog
-
-logger = structlog.get_logger()
-
-from typing import Any, Dict, Optional, List
-from dataclasses import dataclass
-from datetime import datetime
-from app.core.config import settings
-from .models import JRPost, JRTag
-import httpx
-import structlog
-
-logger = structlog.get_logger()
-
-from typing import Any, Dict, Optional, List
-from dataclasses import dataclass
-from datetime import datetime
-from app.core.config import settings
-from .models import JRPost, JRTag
 from .queries import SEARCH_TAGS_QUERY, FETCH_POSTS_QUERY
+from .extractor import JoyReactorExtractor
 import httpx
 import structlog
 
@@ -33,6 +14,7 @@ class JoyReactorClient:
     def __init__(self):
         self.api_url = settings.joyreactor_api_url
         self.base_url = settings.joyreactor_base_url
+        self.extractor = JoyReactorExtractor(self.base_url)
         
         self.headers = {
             "Origin": self.base_url,
@@ -42,7 +24,6 @@ class JoyReactorClient:
             "Accept": "application/json"
         }
         
-        # Separate timeouts as per TS Section 8
         self.timeout = httpx.Timeout(
             timeout=10.0, 
             connect=5.0, 
@@ -87,32 +68,17 @@ class JoyReactorClient:
     async def close(self):
         await self.client.aclose()
 
-    def _normalize_media_url(self, media_data: Optional[Dict[str, Any]]) -> tuple[str, str]:
-        """
-        Normalizes media URL and type based on TS Section 10.
-        """
-        if not media_data:
-            return "", "UNKNOWN"
-        
-        # Image.url is removed as per TS Section 7. 
-        # We must determine the actual URL.
-        media_id = media_data.get("id")
-        if not media_id:
-            return "", "UNKNOWN"
-            
-        # According to TS, we shouldn't assume /img/{id} is always correct,
-        # but as a primary mechanism for GraphQL IDs, we use it if it's the only way
-        # unless we implement HTML scraping.
-        url = f"{self.base_url}/img/{media_id}"
-        
-        return url, media_data.get("type", "UNKNOWN")
+    async def get_post_html(self, post_id: str) -> Optional[str]:
+        url = f"{self.base_url}/post/{post_id}"
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            return response.text
+        except Exception as e:
+            logger.error("fetch_post_html_failed", post_id=post_id, error=str(e))
+            return None
 
     def _normalize_media_type(self, api_type: str) -> str:
-        """
-        Maps API media types to JoyBot media types.
-        """
-        # For PostAttributePicture, we check image.hasVideo
-        # But this is called with media_type which comes from image.type
         api_type = api_type.lower()
         if any(ext in api_type for ext in ["jpg", "jpeg", "png", "webp"]):
             return "image"
@@ -127,18 +93,16 @@ class JoyReactorClient:
         posts_data = data.get("tag", {}).get("postPager", {}).get("posts", [])
         results = []
         for p in posts_data:
-            # Handle attributes safely
             attributes = p.get("attributes", [])
             media_url, media_type = "", "UNKNOWN"
             
-        for attr in attributes:
-            if attr and "image" in attr:
-                img = attr["image"]
-                # If image has video, treat as video
-                media_type_val = "video" if img.get("hasVideo") else img.get("type", "UNKNOWN")
-                media_url, _ = self._normalize_media_url(img)
-                media_type = media_type_val
-                break # Use first image attribute
+            for attr in attributes:
+                if attr and "image" in attr:
+                    img = attr["image"]
+                    media_type_val = "video" if img.get("hasVideo") else img.get("type", "UNKNOWN")
+                    media_url = f"resolve://{p['id']}" 
+                    media_type = media_type_val
+                    break 
             
             results.append(JRPost(
                 id=str(p["id"]),
@@ -165,5 +129,3 @@ class JoyReactorClient:
                 unsafe=t.get("unsafe", False)
             ) for t in tags_data
         ]
-
-

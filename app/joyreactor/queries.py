@@ -17,13 +17,24 @@ query SearchTags($mask: String!) {
 FETCH_POSTS_QUERY = """
 query GetPostsByTag($tagName: String!, $page: Int) {
   tag(name: $tagName) {
-    postPager {
+    postPager(type: NEW) {
       posts(page: $page) {
         id
         text
         createdAt
+        nsfw
+        unsafe
+        postTags {
+          tag {
+            id
+            name
+          }
+        }
         attributes {
+          __typename
           ... on PostAttributePicture {
+            id
+            type
             image {
               id
               type
@@ -31,11 +42,6 @@ query GetPostsByTag($tagName: String!, $page: Int) {
               width
               height
             }
-          }
-        }
-        postTags {
-          tag {
-            name
           }
         }
       }

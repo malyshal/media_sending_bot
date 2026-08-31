@@ -24,6 +24,26 @@ class DeliveryService:
         if not post:
             logger.info("no_suitable_post_found", chat_id=chat_id)
             return None
+        
+        # Resolve media URL if it's a resolve:// link
+        media_url = post.media_url
+        if media_url and media_url.startswith("resolve://"):
+            post_id = media_url.replace("resolve://", "")
+            jr_client = self.post_service.client
+            html = await jr_client.get_post_html(post_id)
+            if html:
+                real_url = await jr_client.extractor.extract_media_url(
+                    html, post_id, is_video=(post.media_type == "video")
+                )
+                if real_url:
+                    media_url = real_url
+                else:
+                    logger.error("could_not_extract_url", post_id=post_id)
+                    # We could try to return None or fall back, but TS says a real URL is required.
+                    return None
+            else:
+                logger.error("could_not_fetch_html", post_id=post_id)
+                return None
 
         # 2. RACE CONDITION FIX: Try to lock the post in DB before processing
         # Only the process that successfully inserts into history can send the post.
@@ -31,11 +51,11 @@ class DeliveryService:
             logger.info("post_already_locked_by_another_process", chat_id=chat_id, post_id=post.id)
             # Recursively try to get the next available post
             return await self.send_next_post(chat_id, include_tags, exclude_tags)
-
+        
         processed_path: Optional[Path] = None
         try:
             # 3. Prepare media
-            processed_path, mime_type = await self.media_manager.process_media(post.media_url, post.media_type)
+            processed_path, mime_type = await self.media_manager.process_media(media_url, post.media_type)
             
             # 4. Send to Telegram
             caption = post.text or ""
@@ -52,6 +72,7 @@ class DeliveryService:
                     caption=caption
                 )
             return message
+
 
         except Exception as e:
             logger.error("delivery_failed", chat_id=chat_id, post_id=post.id, error=str(e))
