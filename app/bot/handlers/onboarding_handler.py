@@ -58,7 +58,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 "🏷 Сначала добавь первый тег, который хочешь видеть в своей ленте."
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [[InlineKeyboardButton(text="🔎 Найти тег", callback_data="find_tag")]]
+                [InlineKeyboardButton(text="🔎 Найти тег", callback_data="find_tag")]
             ])
             await message.answer(text, reply_markup=kb)
             await state.set_state(OnboardingStates.waiting_for_first_tag)
@@ -75,10 +75,10 @@ async def cmd_start(message: Message, state: FSMContext):
             )
             
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [[await get_post_button()]],
-                [[InlineKeyboardButton(text="🏷 Изменить теги", callback_data="change_tags")]],
-                [[InlineKeyboardButton(text="⏰ Расписание", callback_data="set_schedule")]],
-                [[await get_settings_button()]]
+                [await get_post_button()],
+                [InlineKeyboardButton(text="🏷 Изменить теги", callback_data="change_tags")],
+                [InlineKeyboardButton(text="⏰ Расписание", callback_data="set_schedule")],
+                [await get_settings_button()]
             ])
             await message.answer(text, reply_markup=kb)
 
