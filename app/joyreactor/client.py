@@ -5,7 +5,6 @@ from app.core.config import settings
 from .models import JRPost, JRTag
 from .queries import SEARCH_TAGS_QUERY, FETCH_POSTS_QUERY, GET_POST_QUERY
 from .extractor import JoyReactorExtractor
-from .rate_limiter import RateLimiter
 import httpx
 import base64
 import structlog
@@ -18,7 +17,6 @@ class JoyReactorClient:
         self.api_url = settings.joyreactor_api_url
         self.base_url = settings.joyreactor_base_url
         self.extractor = JoyReactorExtractor(self.base_url)
-        self.rate_limiter = RateLimiter(min_interval=2.5)
         
         self.headers = {
             "Origin": self.base_url,
@@ -48,7 +46,6 @@ class JoyReactorClient:
         max_retries = 3
         
         while retries <= max_retries:
-            await self.rate_limiter.wait()
             
             try:
                 response = await self.client.post(self.api_url, json=payload)

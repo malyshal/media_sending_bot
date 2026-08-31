@@ -36,7 +36,7 @@ class PostRepository:
         result = await self.session.execute(query.limit(limit))
         return result.scalars().all()
 
-    async def try_lock_post_for_chat(self, chat_id: int, post_id: int) -> bool:
+    async def try_lock_post_for_chat(self, chat_id: int, post_id: str) -> bool:
         """
         Attempts to mark a post as sent using ON CONFLICT DO NOTHING.
         Returns True if this process won the right to send the post.

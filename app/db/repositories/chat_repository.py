@@ -2,6 +2,7 @@ from typing import Optional, List
 from sqlalchemy import select, update, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.chat import ChatConfig
+from app.core.config import settings
 
 class ChatRepository:
     def __init__(self, session: AsyncSession):
@@ -16,12 +17,13 @@ class ChatRepository:
             # Create default config if not exists
             config = ChatConfig(
                 chat_id=chat_id,
-                auto_send=True,
-                max_posts_per_batch=3,
+                auto_send=False,
+                schedule_max_posts=3,
+                next_max_posts=1,
                 include_tags=[],
                 exclude_tags=[],
                 schedule=None,
-                timezone="Europe/Moscow"
+                timezone=settings.default_timezone
             )
             self.session.add(config)
             await self.session.commit()

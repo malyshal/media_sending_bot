@@ -9,8 +9,9 @@ class ChatConfig(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     
     # Delivery settings
-    auto_send: Mapped[bool] = mapped_column(Boolean, default=True)
-    max_posts_per_batch: Mapped[int] = mapped_column(Integer, default=3)
+    auto_send: Mapped[bool] = mapped_column(Boolean, default=False)
+    schedule_max_posts: Mapped[int] = mapped_column(Integer, default=3)
+    next_max_posts: Mapped[int] = mapped_column(Integer, default=1)
     
     # Filtering
     include_tags: Mapped[list[str]] = mapped_column(JSON, default=list)

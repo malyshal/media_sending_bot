@@ -21,12 +21,12 @@ class PostService:
         """
         return await self.get_next_post_for_chat(chat_id, include_tags, exclude_tags)
 
-    async def get_next_post_for_chat(self, chat_id: int, include_tags: List[str], exclude_tags: List[str]) -> Optional[Post]:
+    async def get_next_post_for_chat(self, chat_id: int, include_tags: List[str], exclude_tags: List[str], ignore_history: bool = False) -> Optional[Post]:
         # 1. Try to find a post in cache that fits tags and isn't sent
         candidate_posts = await self.repo.get_posts_by_tags(include_tags, exclude_tags, limit=50)
         
         for post in candidate_posts:
-            if not await self.repo.is_post_sent(chat_id, post.id):
+            if ignore_history or not await self.repo.is_post_sent(chat_id, post.id):
                 return post
         
         # 2. If no suitable post in cache, try to fetch new ones from API
@@ -45,10 +45,10 @@ class PostService:
                 all_fetched_posts.extend(jr_posts)
             except Exception as e:
                 logger.error("post_service_fetch_error", tag=tag, error=str(e))
-
+        
         if not all_fetched_posts:
             return None
-
+        
         # Deduplicate by post ID (TS Section 16)
         unique_posts = {}
         for p in all_fetched_posts:
@@ -73,7 +73,7 @@ class PostService:
             )
             await self.repo.save_post(db_post)
             
-            if not await self.repo.is_post_sent(chat_id, db_post.id):
+            if ignore_history or not await self.repo.is_post_sent(chat_id, db_post.id):
                 return db_post
                 
         return None

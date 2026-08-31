@@ -2,6 +2,7 @@ import asyncio
 import structlog
 from typing import Any, Callable, Awaitable, NamedTuple
 from .base import BaseQueue
+from app.core.config import settings
 
 logger = structlog.get_logger()
 
@@ -14,9 +15,9 @@ class APIRequest(NamedTuple):
     attempts: int = 0
 
 class APIQueue(BaseQueue):
-    def __init__(self, interval: float = 2.0):
+    def __init__(self, interval: Optional[float] = None):
         self._queue = asyncio.PriorityQueue()
-        self._interval = interval
+        self._interval = interval or settings.api_request_interval
         self._running = True
         self._counter = 0
         self._retry_delays = [1, 5, 15]

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # JoyReactor API Settings
     joyreactor_base_url: str = "https://joyreactor.cc"
     joyreactor_api_url: str = "https://api.joyreactor.com/graphql"
-    api_request_interval: float = 2.0
+    api_request_interval: float = 2.5
     
     # Application Settings
     log_level: str = "INFO"
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     cache_retention_hours: int = 6
     max_fresh_posts_for_batch: int = 20
     max_media_size_mb: int = 50
-    default_timezone: str = "Europe/Moscow"
+    default_timezone: str = "Europe/Minsk"
     
     model_config = SettingsConfigDict(
         env_file=".env", 

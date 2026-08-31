@@ -111,30 +111,19 @@ async def select_tag(callback: CallbackQuery, state: FSMContext):
     tag = callback.data.split(":")[1]
     await callback.answer()
     
-    async with async_session() as session:
-        chat_repo = ChatRepository(session)
-        config = await chat_repo.get_config(callback.message.chat.id)
-        
-        if tag not in config.include_tags:
-            config.include_tags.append(tag)
-            await chat_repo.update_tags(callback.message.chat.id, config.include_tags, config.exclude_tags)
-        
-        await callback.message.answer(f"✅ Тег «{tag}» добавлен в список предпочтительных.")
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [await get_post_button()],
-            [await get_add_tag_button()],
-            [await get_exclude_tag_button()],
-            [await get_settings_button()]
-        ])
-        await callback.message.answer(
-            "Теперь вы можете получить первый пост или настроить бота дальше.",
-            reply_markup=kb
-        )
-        await state.clear()
+    await state.update_data(selected_tag=tag)
+    await state.set_state(ChatSettingsStates.confirming_tag_action)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить в INCLUDE", callback_data="tag_add_inc")],
+        [InlineKeyboardButton(text="🚫 Добавить в EXCLUDE", callback_data="tag_add_exc")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="tag_cancel")]
+    ])
+    
+    await callback.message.edit_text(f"Что сделать с тегом *{tag}*?", parse_mode="Markdown", reply_markup=kb)
 
 @router.callback_query(F.data == "get_first_post")
-async def get_first_post_handler(callback: CallbackQuery, bot: Bot, post_service: PostService):
+async def get_first_post_handler(callback: CallbackQuery, bot: Bot, post_service: PostService, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     await callback.answer()
     await callback.message.answer("Ищу подходящий пост...")
     
@@ -148,13 +137,16 @@ async def get_first_post_handler(callback: CallbackQuery, bot: Bot, post_service
         media_manager = MediaManager()
         delivery = DeliveryService(bot, post_service, media_manager)
         
-        post = await post_service.get_first_post_for_onboarding(
-            callback.message.chat.id, 
-            config.include_tags, 
-            config.exclude_tags
+        # Onboarding should likely be a "first look" so we can ignore history,
+        # but generally it's safer to follow the regular delivery logic here
+        # as it's the first time they see a post.
+        sent_count = await delivery.send_batch_posts(
+            chat_id=callback.message.chat.id,
+            include_tags=config.include_tags,
+            exclude_tags=config.exclude_tags,
+            max_posts=1,
+            ignore_history=False # For onboarding, we want a guaranteed fresh post
         )
         
-        if post:
-            await delivery.send_post(callback.message.chat.id, post)
-        else:
+        if sent_count == 0:
             await callback.message.answer("К сожалению, не удалось найти подходящий пост прямо сейчас. Попробуйте позже!")

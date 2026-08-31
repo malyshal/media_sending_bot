@@ -30,17 +30,22 @@ class SchedulerService:
         now_utc = datetime.now(zoneinfo.ZoneInfo("UTC"))
         
         for config in chats:
-            if self._should_send_now(config, now_utc):
+            if config.schedule and self._should_send_now(config, now_utc):
                 logger.info("scheduled_send_triggered", chat_id=config.chat_id)
                 
-                await self.delivery_service.send_next_post(
+                sent_count = await self.delivery_service.send_batch_posts(
                     chat_id=config.chat_id,
                     include_tags=config.include_tags,
-                    exclude_tags=config.exclude_tags
+                    exclude_tags=config.exclude_tags,
+                    max_posts=config.schedule_max_posts
                 )
                 
-                config.last_batch_time = now_utc.replace(tzinfo=None)
-                await session.commit()
+                if sent_count > 0:
+                    config.last_batch_time = now_utc.replace(tzinfo=None)
+                    await session.commit()
+                    logger.info("scheduled_send_completed", chat_id=config.chat_id, sent_count=sent_count)
+                else:
+                    logger.info("scheduled_send_no_posts", chat_id=config.chat_id)
 
     def _should_send_now(self, config: ChatConfig, now_utc: datetime) -> bool:
         try:

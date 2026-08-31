@@ -28,7 +28,8 @@ async def cmd_settings(message: types.Message):
             f"⚙️ *Настройки JoyBot*\n\n"
             f"✅ Автоотправка: {'Вкл' if config.auto_send else 'Выкл'}\n"
             f"🕒 Время: {config.schedule} ({config.timezone})\n"
-            f"📦 Лимит: {config.max_posts_per_batch} постов\n"
+            f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
+            f"📦 Лимит (/next): {config.next_max_posts} постов\n"
             f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
             f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
         )
@@ -141,7 +142,8 @@ async def cb_toggle_auto(callback: types.CallbackQuery):
             f"⚙️ *Настройки JoyBot*\n\n"
             f"✅ Автоотправка: {status}\n"
             f"🕒 Время: {config.schedule} ({config.timezone})\n"
-            f"📦 Лимит: {config.max_posts_per_batch} постов\n"
+            f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
+            f"📦 Лимит (/next): {config.next_max_posts} постов\n"
             f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
             f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
         )
@@ -170,7 +172,8 @@ async def proc_set_schedule(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     async with async_session() as session:
         chat_repo = ChatRepository(session)
-        await chat_repo.update_schedule(chat_id, message.text, "Europe/Moscow")
+        from app.core.config import settings
+        await chat_repo.update_schedule(chat_id, message.text, settings.default_timezone)
         
     await message.answer(f"⏰ Время автоматической отправки установлено на {message.text}")
     await state.clear()

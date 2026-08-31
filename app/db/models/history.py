@@ -8,7 +8,7 @@ class PostHistory(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    post_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    post_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (

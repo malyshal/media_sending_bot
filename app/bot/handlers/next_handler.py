@@ -32,11 +32,14 @@ async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQ
         # Load actual chat settings
         config = await chat_repo.get_config(chat_id)
         
-        res = await delivery_service.send_next_post(
+        # Use batch sending for /next to respect next_max_posts and ignore history
+        sent_count = await delivery_service.send_batch_posts(
             chat_id=chat_id, 
             include_tags=config.include_tags, 
-            exclude_tags=config.exclude_tags
+            exclude_tags=config.exclude_tags,
+            max_posts=config.next_max_posts,
+            ignore_history=True
         )
         
-        if not res:
+        if sent_count == 0:
             await message.answer("No new posts found for your filters right now! 😢")
