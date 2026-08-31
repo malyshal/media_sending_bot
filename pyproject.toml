@@ -13,6 +13,7 @@ dependencies = [
     "httpx",
     "structlog",
     "Pillow",
+    "beautifulsoup4",
 ]
 
 [build-system]
