@@ -1,6 +1,6 @@
 import asyncio
 import structlog
-from typing import Any, Callable, Awaitable, NamedTuple
+from typing import Any, Callable, Awaitable, NamedTuple, Optional
 from .base import BaseQueue
 from app.core.config import settings
 

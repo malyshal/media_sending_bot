@@ -2,7 +2,6 @@ from aiogram import Router, types, Bot
 from aiogram.filters import Command
 import structlog
 from app.services.delivery_service import DeliveryService
-from app.db.repositories.chat_repository import ChatRepository # Will create this
 from app.db.session import async_session
 
 logger = structlog.get_logger()
@@ -32,14 +31,15 @@ async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQ
         # Load actual chat settings
         config = await chat_repo.get_config(chat_id)
         
-        # Use batch sending for /next to respect next_max_posts and ignore history
+        # Use batch sending for /next to respect next_max_posts.
+        # History IS respected: previously sent posts are never repeated.
         sent_count = await delivery_service.send_batch_posts(
-            chat_id=chat_id, 
-            include_tags=config.include_tags, 
+            chat_id=chat_id,
+            include_tags=config.include_tags,
             exclude_tags=config.exclude_tags,
             max_posts=config.next_max_posts,
-            ignore_history=True
+            ignore_history=False
         )
         
         if sent_count == 0:
-            await message.answer("No new posts found for your filters right now! 😢")
+            await message.answer("No new (unsent) posts found for your filters right now! 😢")

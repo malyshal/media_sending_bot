@@ -53,3 +53,21 @@ class ChatRepository:
         )
         await self.session.execute(query)
         await self.session.commit()
+
+    async def set_schedule_max_posts(self, chat_id: int, value: int) -> ChatConfig:
+        await self.get_config(chat_id)
+        query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(
+            schedule_max_posts=max(1, min(value, 20))
+        )
+        await self.session.execute(query)
+        await self.session.commit()
+        return await self.get_config(chat_id)
+
+    async def set_next_max_posts(self, chat_id: int, value: int) -> ChatConfig:
+        await self.get_config(chat_id)
+        query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(
+            next_max_posts=max(1, min(value, 20))
+        )
+        await self.session.execute(query)
+        await self.session.commit()
+        return await self.get_config(chat_id)

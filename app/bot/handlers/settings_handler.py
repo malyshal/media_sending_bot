@@ -7,9 +7,6 @@ import structlog
 from app.db.session import async_session
 from app.db.repositories.chat_repository import ChatRepository
 from app.db.repositories.user_repository import UserRepository
-from app.services.post_service import PostService
-from app.services.media_manager import MediaManager
-from app.services.delivery_service import DeliveryService
 from app.queue.api_queue import APIQueue
 from app.joyreactor.client import JoyReactorClient
 from app.bot.states import ChatSettingsStates
@@ -23,24 +20,34 @@ async def cmd_settings(message: types.Message):
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
-        
-        text = (
-            f"⚙️ *Настройки JoyBot*\n\n"
-            f"✅ Автоотправка: {'Вкл' if config.auto_send else 'Выкл'}\n"
-            f"🕒 Время: {config.schedule} ({config.timezone})\n"
-            f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
-            f"📦 Лимит (/next): {config.next_max_posts} постов\n"
-            f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
-            f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
-        )
-        
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔍 Поиск тегов", callback_data="set_tags")
-        kb.button(text="⏰ Время", callback_data="set_schedule")
-        kb.button(text="🛑 Стоп/Старт", callback_data="toggle_auto")
-        kb.adjust(1)
-        
+
+        text = build_settings_text(config)
+
+        kb = build_settings_keyboard()
         await message.answer(text, parse_mode="Markdown", reply_markup=kb.as_markup())
+
+
+def build_settings_text(config) -> str:
+    return (
+        f"⚙️ *Настройки JoyBot*\n\n"
+        f"✅ Автоотправка: {'Вкл' if config.auto_send else 'Выкл'}\n"
+        f"🕒 Время: {config.schedule} ({config.timezone})\n"
+        f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
+        f"📦 Лимит (/next): {config.next_max_posts} постов\n"
+        f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
+        f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
+    )
+
+
+def build_settings_keyboard() -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔍 Поиск тегов", callback_data="set_tags")
+    kb.button(text="⏰ Время", callback_data="set_schedule")
+    kb.button(text=f"📦 Лимит (Регламент)", callback_data="set_schedule_max_posts")
+    kb.button(text=f"📩 Лимит (/next)", callback_data="set_next_max_posts")
+    kb.button(text="🛑 Стоп/Старт", callback_data="toggle_auto")
+    kb.adjust(1)
+    return kb
 
 @router.message(Command("search_tags"))
 async def cmd_search_tags(message: types.Message, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
@@ -137,22 +144,10 @@ async def cb_toggle_auto(callback: types.CallbackQuery):
         
         status = "Вкл" if new_state else "Выкл"
         await callback.answer(f"Автоотправка: {status}")
-        
-        text = (
-            f"⚙️ *Настройки JoyBot*\n\n"
-            f"✅ Автоотправка: {status}\n"
-            f"🕒 Время: {config.schedule} ({config.timezone})\n"
-            f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
-            f"📦 Лимит (/next): {config.next_max_posts} постов\n"
-            f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
-            f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
-        )
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔍 Поиск тегов", callback_data="set_tags")
-        kb.button(text="⏰ Время", callback_data="set_schedule")
-        kb.button(text="🛑 Стоп/Старт", callback_data="toggle_auto")
-        kb.adjust(1)
-        
+
+        text = build_settings_text(config)
+        kb = build_settings_keyboard()
+
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "set_schedule")
@@ -177,6 +172,69 @@ async def proc_set_schedule(message: types.Message, state: FSMContext):
         
     await message.answer(f"⏰ Время автоматической отправки установлено на {message.text}")
     await state.clear()
+
+@router.callback_query(F.data == "set_schedule_max_posts")
+async def cb_set_schedule_max_posts(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ChatSettingsStates.setting_schedule_max_posts)
+    await callback.message.answer(
+        "Введите лимит постов для регламентной отправки (число от 1 до 20):"
+    )
+    await callback.answer()
+
+@router.message(ChatSettingsStates.setting_schedule_max_posts)
+async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext):
+    value = _parse_limit(message.text)
+    if value is None:
+        await message.answer("Неверное значение! Введите целое число от 1 до 20.")
+        return
+
+    chat_id = message.chat.id
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        config = await chat_repo.set_schedule_max_posts(chat_id, value)
+
+    await message.answer(
+        f"📦 Лимит (Регламент) установлен: {config.schedule_max_posts} постов",
+        reply_markup=build_settings_keyboard().as_markup()
+    )
+    await state.clear()
+
+@router.callback_query(F.data == "set_next_max_posts")
+async def cb_set_next_max_posts(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ChatSettingsStates.setting_next_max_posts)
+    await callback.message.answer(
+        "Введите лимит постов для команды /next (число от 1 до 20):"
+    )
+    await callback.answer()
+
+@router.message(ChatSettingsStates.setting_next_max_posts)
+async def proc_set_next_max_posts(message: types.Message, state: FSMContext):
+    value = _parse_limit(message.text)
+    if value is None:
+        await message.answer("Неверное значение! Введите целое число от 1 до 20.")
+        return
+
+    chat_id = message.chat.id
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        config = await chat_repo.set_next_max_posts(chat_id, value)
+
+    await message.answer(
+        f"📩 Лимит (/next) установлен: {config.next_max_posts} постов",
+        reply_markup=build_settings_keyboard().as_markup()
+    )
+    await state.clear()
+
+def _parse_limit(text: str | None) -> int | None:
+    if not text:
+        return None
+    text = text.strip()
+    if not text.isdigit():
+        return None
+    value = int(text)
+    if value < 1 or value > 20:
+        return None
+    return value
 
 @router.message(Command("stop"))
 async def cmd_stop(message: types.Message):
