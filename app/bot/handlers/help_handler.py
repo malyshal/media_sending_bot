@@ -5,17 +5,20 @@ import structlog
 logger = structlog.get_logger()
 router = Router()
 
+
+def help_text() -> str:
+    return (
+        "📖 *Справка JoyBot*\n\n"
+        "Основное меню — нажмите /start или кнопку «Меню» рядом с полем ввода.\n\n"
+        "• /next — получить посты (по вашим тегам)\n"
+        "• /settings — настройки\n"
+        "• /stop — выключить автоотправку\n"
+        "• /delete_my_data — запросить удаление данных\n"
+        "• /restore — восстановить аккаунт\n\n"
+        "Все действия (теги, расписание, лимиты) доступны через кнопки меню — команды вводить не обязательно."
+    )
+
+
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
-    text = (
-        "📖 Справка по командам JoyBot:\n\n"
-        "• /start — запуск и основные действия\n"
-        "• /next — получить следующий пост\n"
-        "• /search_tags — найти тег\n"
-        "• /settings — настройки\n"
-        "• /help — справка\n"
-        "• /delete_my_data — запросить удаление данных\n"
-        "• /restore — восстановить данные\n"
-        "• /stats — статистика для администратора"
-    )
-    await message.answer(text)
+    await message.answer(help_text(), parse_mode="Markdown")

@@ -14,6 +14,7 @@ from app.core.cleanup import cleanup_worker
 from app.db.session import async_session, engine
 from app.db.models.base import Base
 from app.core.bootstrap import bootstrap_admins
+from app.bot.bot_commands import setup_bot_commands
 
 logger = structlog.get_logger()
 
@@ -79,6 +80,9 @@ async def main():
     dp.include_router(settings_router)
     dp.include_router(admin_router)
     dp.include_router(help_router)
+    
+    # Register the "/" command menu (quick access for users)
+    await setup_bot_commands(bot)
     
     # Start background tasks
     asyncio.create_task(scheduler_loop(bot, global_queue, global_jr_client))

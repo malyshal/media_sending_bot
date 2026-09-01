@@ -12,7 +12,7 @@ class ChatRepository:
         self.session = session
 
     async def get_config(self, chat_id: int) -> ChatConfig:
-        query = select(ChatConfig).where(ChatConfig.chat_id == chat_id)
+        query = select(ChatConfig).where(ChatConfig.chat_id == chat_id).execution_options(populate_existing=True)
         result = await self.session.execute(query)
         config = result.scalar_one_or_none()
         
@@ -44,10 +44,12 @@ class ChatRepository:
         await self.session.execute(query)
         await self.session.commit()
 
-    async def set_auto_send(self, chat_id: int, enabled: bool):
+    async def set_auto_send(self, chat_id: int, enabled: bool) -> ChatConfig:
+        await self.get_config(chat_id)
         query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(auto_send=enabled)
         await self.session.execute(query)
         await self.session.commit()
+        return await self.get_config(chat_id)
 
     async def update_schedule(self, chat_id: int, schedule: str, timezone: str):
         """Stores a daily delivery time. Only strict 'HH:MM' is accepted."""
@@ -57,6 +59,16 @@ class ChatRepository:
             schedule=schedule,
             timezone=timezone
         )
+        await self.session.execute(query)
+        await self.session.commit()
+
+    async def set_timezone(self, chat_id: int, timezone: str):
+        import zoneinfo
+        try:
+            zoneinfo.ZoneInfo(timezone)
+        except Exception as e:
+            raise ValueError(f"Invalid timezone: {timezone!r}") from e
+        query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(timezone=timezone)
         await self.session.execute(query)
         await self.session.commit()
 
