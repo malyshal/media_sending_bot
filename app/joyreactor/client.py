@@ -9,6 +9,7 @@ import httpx
 import base64
 import structlog
 import asyncio
+from datetime import timezone
 
 logger = structlog.get_logger()
 
@@ -94,33 +95,67 @@ class JoyReactorClient:
             logger.error("decode_global_id_failed", global_id=global_id, error=str(e))
             return global_id
 
+    @staticmethod
+    def _media_from_attributes(post_id: str, attributes: List[Dict[str, Any]]) -> tuple[Optional[str], Optional[str]]:
+        """Builds a direct media URL from the first picture attribute.
+
+        Verified CDN patterns (numeric attribute id = <nid>):
+          JPEG image:  https://img1.joyreactor.cc/pics/post/-<nid>.jpeg
+          GIF/video:   https://img1.joyreactor.cc/pics/post/-<nid>.webm
+        """
+        for attr in attributes or []:
+            if attr.get("__typename") != "PostAttributePicture":
+                continue
+            numeric_id = JoyReactorClient._decode_global_id_static(attr.get("id", ""))
+            if not numeric_id.isdigit():
+                logger.error("unknown_media_id_format", post_id=post_id, attr_id=attr.get("id"))
+                continue
+            image = attr.get("image", {}) or {}
+            has_video = bool(image.get("hasVideo"))
+            media_type = (image.get("type") or "").upper()
+            # Animated content (GIF/webm) served as .webm, static photos as .jpeg
+            if has_video or media_type == "GIF":
+                return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "video"
+            return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.jpeg", "photo"
+        return None, None
+
+    @staticmethod
+    def _decode_global_id_static(global_id: str) -> str:
+        try:
+            decoded = base64.b64decode(global_id).decode("utf-8")
+            return decoded.split(":")[-1] if ":" in decoded else decoded
+        except Exception:
+            return global_id
+
+    # alias for internal use
+    _decode_global_id_static = _decode_global_id_static
+
     async def fetch_post(self, post_id: str) -> Optional[JRPost]:
         """
         Fetches a single post and normalizes it.
         """
         data = await self.execute(GET_POST_QUERY, {"id": post_id})
-        post_data = data.get("post")
+        post_data = data.get("node")
         if not post_data:
             return None
-            
-        # Note: slug should ideally be retrieved from GraphQL if possible, 
-        # or by making a quick HTML request to get the URL.
-        # For now, we use a placeholder "post" to satisfy the URL builder.
-        slug = "post" 
-        
-        content = self.extractor.normalize_post(
-            post_id=post_data["id"],
-            text=post_data.get("text"),
-            attributes=post_data.get("attributes", []),
-            slug=slug
-        )
-        
+
+        media_url, media_type = self._media_from_attributes(post_data["id"], post_data.get("attributes", []))
+
+        try:
+            created_at = datetime.fromisoformat(post_data["createdAt"])
+        except (KeyError, ValueError):
+            created_at = datetime.utcnow()
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+
         return JRPost(
             id=post_data["id"],
             text=post_data.get("text"),
-            content=content,
+            content=[],
             tags=[pt["tag"]["name"] for pt in post_data.get("postTags", [])],
-            created_at=datetime.fromisoformat(post_data["createdAt"]),
+            created_at=created_at,
+            media_url=media_url,
+            media_type=media_type,
             raw_data=post_data
         )
 
@@ -131,9 +166,28 @@ class JoyReactorClient:
         posts_data = data.get("tag", {}).get("postPager", {}).get("posts", [])
         results = []
         for p in posts_data:
-            post = await self.fetch_post(p["id"])
-            if post:
-                results.append(post)
+            # Posts from the list already contain everything needed; no per-post API call
+            media_url, media_type = self._media_from_attributes(p["id"], p.get("attributes", []))
+            if not media_url:
+                logger.warning("post_without_media_skipped", post_id=p["id"])
+                continue
+            try:
+                created_at = datetime.fromisoformat(p["createdAt"])
+            except (KeyError, ValueError):
+                created_at = datetime.utcnow()
+            # DB columns are TIMESTAMP WITHOUT TIME ZONE (UTC); API returns tz-aware ISO strings
+            if created_at.tzinfo is not None:
+                created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+            results.append(JRPost(
+                id=p["id"],
+                text=p.get("text"),
+                content=[],
+                tags=[pt["tag"]["name"] for pt in p.get("postTags", [])],
+                created_at=created_at,
+                media_url=media_url,
+                media_type=media_type,
+                raw_data=p
+            ))
         return results
 
     async def search_tags(self, mask: str) -> List[JRTag]:

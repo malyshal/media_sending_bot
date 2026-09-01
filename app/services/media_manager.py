@@ -4,7 +4,6 @@ import structlog
 from typing import Optional, Tuple
 from pathlib import Path
 from app.core.config import settings
-import httpx
 
 logger = structlog.get_logger()
 
@@ -28,7 +27,7 @@ class MediaManager:
                 os.remove(temp_file)
             return processed_file, "image/jpeg"
             
-        if media_type in ["mp4", "webm", "gif"]:
+        if media_type in ["mp4", "webm", "gif", "video"]:
             processed_file, final_mime = await self._compress_video(temp_file)
             if processed_file != temp_file:
                 os.remove(temp_file)
@@ -37,25 +36,111 @@ class MediaManager:
         return temp_file, f"image/{file_ext}"
 
     async def _download_file_stream(self, url: str, dest: Path):
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream("GET", url, follow_redirects=True) as response:
-                response.raise_for_status()
-                
-                content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > self.max_size:
-                    raise ValueError(f"File too large: {content_length} bytes")
-                
-                bytes_downloaded = 0
-                with open(dest, "wb") as f:
-                    async for chunk in response.aiter_bytes():
-                        bytes_downloaded += len(chunk)
-                        if bytes_downloaded > self.max_size:
-                            # Cleanup partial file
-                            f.close()
-                            if dest.exists():
-                                os.remove(dest)
-                            raise ValueError("File exceeded MAX_MEDIA_SIZE_MB during download")
-                        f.write(chunk)
+        # httpx connect from the long-lived polling loop intermittently fails
+        # TLS handshake with the image CDN (ConnectTimeout), while a blocking
+        # stdlib download in a worker thread is reliable — so use it.
+        await asyncio.to_thread(self._download_file_sync, url, dest)
+
+    # host -> last known working IP (some CDN IPs silently drop TLS handshakes)
+    _good_ip: dict = {}
+
+    def _download_file_sync(self, url: str, dest: Path):
+        import urllib.request
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        host = parsed.hostname
+        ip_override = self._good_ip.get(host)
+
+        last_err: Exception | None = None
+        candidates = [ip_override] if ip_override else self._resolve_ips(host)
+        for ip in candidates:
+            try:
+                self._fetch_via_ip(url, ip, host, dest)
+                self._good_ip[host] = ip
+                return
+            except Exception as e:
+                logger.warning("media_download_ip_failed", host=host, ip=ip, error=str(e))
+                last_err = e
+        if last_err:
+            raise last_err
+        raise ConnectionError(f"DNS resolution failed for {host}")
+
+    @staticmethod
+    def _resolve_ips(host: str) -> list:
+        import socket
+        try:
+            infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+            seen, ips = set(), []
+            for ai in infos:
+                ip = ai[4][0]
+                if ip not in seen:
+                    seen.add(ip)
+                    ips.append(ip)
+            return ips
+        except socket.gaierror as e:
+            raise ConnectionError(f"DNS failure for {host}: {e}") from e
+
+    def _fetch_via_ip(self, url: str, ip: str, host: str, dest: Path):
+        import socket
+        import ssl
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+
+        # Connect to the chosen IP but do TLS handshake with the real hostname
+        raw = socket.create_connection((ip, 443), timeout=30)
+        try:
+            tls = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+        except Exception:
+            raw.close()
+            raise
+        try:
+            tls.sendall(
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
+                f"Connection: close\r\n\r\n".encode()
+            )
+            fobj = tls.makefile("rb")
+            status_line = fobj.readline().decode("latin-1").strip()
+            parts = status_line.split(" ", 2)
+            status = int(parts[1]) if len(parts) >= 2 else 0
+            headers = {}
+            while True:
+                line = fobj.readline()
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+                k, _, v = line.decode("latin-1").partition(":")
+                headers[k.strip().lower()] = v.strip()
+            if status in (301, 302, 303, 307, 308):
+                raise ConnectionError(f"Redirect not supported: {headers.get('location')}")
+            if status != 200:
+                raise ConnectionError(f"HTTP {status}")
+            length = headers.get("content-length")
+            if length and int(length) > self.max_size:
+                raise ValueError(f"File too large: {length} bytes")
+            downloaded = 0
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = fobj.read(64 * 1024)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > self.max_size:
+                        f.close()
+                        if dest.exists():
+                            os.remove(dest)
+                        raise ValueError("File exceeded MAX_MEDIA_SIZE_MB during download")
+                    f.write(chunk)
+        finally:
+            try:
+                tls.close()
+            except Exception:
+                pass
 
     async def _convert_webp(self, path: Path) -> Path:
         from PIL import Image
@@ -103,8 +188,9 @@ class MediaManager:
 
     def _get_extension(self, media_type: str) -> str:
         mapping = {
-            "png": "png", "jpeg": "jpg", "jpg": "jpg", 
-            "webp": "webp", "gif": "gif", "mp4": "mp4", "webm": "webm"
+            "png": "png", "jpeg": "jpg", "jpg": "jpg", "photo": "jpg",
+            "webp": "webp", "gif": "gif", "mp4": "mp4", "webm": "webm",
+            "video": "webm"
         }
         return mapping.get(media_type.lower(), "bin")
 

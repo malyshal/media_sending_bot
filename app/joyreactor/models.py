@@ -23,6 +23,8 @@ class JRPost:
     tags: List[str]
     created_at: datetime
     raw_data: Dict[str, Any]
+    media_url: Optional[str] = None
+    media_type: Optional[str] = None  # "photo" or "video"
 
 @dataclass
 class JRTag:

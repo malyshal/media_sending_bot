@@ -56,6 +56,11 @@ class PostService:
         
         # Apply EXCLUDE and check if sent
         for jr_p in unique_posts.values():
+            # Skip posts without resolvable media
+            if not jr_p.media_url:
+                logger.warning("post_has_no_media", post_id=jr_p.id)
+                continue
+
             # Check if post contains any exclude tags
             if any(ex_tag in jr_p.tags for ex_tag in exclude_tags):
                 continue
@@ -65,7 +70,7 @@ class PostService:
                 id=jr_p.id,
                 text=jr_p.text,
                 media_url=jr_p.media_url,
-                media_type=jr_p.media_type,
+                media_type=jr_p.media_type or "photo",
                 tags=jr_p.tags,
                 created_at=jr_p.created_at,
                 updated_at=jr_p.created_at,

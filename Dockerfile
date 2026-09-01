@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir .
 # Copy application code
 COPY . .
 
-CMD ["python", "-m", "app.main"]
+CMD ["python", "main.py"]

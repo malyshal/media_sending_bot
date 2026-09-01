@@ -36,25 +36,8 @@ class DeliveryService:
             logger.info("no_suitable_post_found", chat_id=chat_id)
             return None
         
-        # Resolve media URL if it's a resolve:// link
+        # Media URL is already a direct CDN link (built from GraphQL attributes).
         media_url = post.media_url
-        if media_url and media_url.startswith("resolve://"):
-            post_id = media_url.replace("resolve://", "")
-            jr_client = self.post_service.client
-            html = await jr_client.get_post_html(post_id)
-            if html:
-                real_url = await jr_client.extractor.extract_media_url(
-                    html, post_id, is_video=(post.media_type == "video")
-                )
-                if real_url:
-                    media_url = real_url
-                else:
-                    logger.error("could_not_extract_url", post_id=post_id)
-                    # We could try to return None or fall back, but TS says a real URL is required.
-                    return None
-            else:
-                logger.error("could_not_fetch_html", post_id=post_id)
-                return None
         
         # 2. RACE CONDITION FIX: Try to lock the post in DB before processing
         # Only the process that successfully inserts into history can send the post.
@@ -88,7 +71,10 @@ class DeliveryService:
             return message
         
         except Exception as e:
-            logger.error("delivery_failed", chat_id=chat_id, post_id=post.id, error=str(e))
+            logger.error(
+                "delivery_failed", chat_id=chat_id, post_id=post.id,
+                error=str(e) or repr(e), exc_type=type(e).__name__,
+            )
             # IMPROVEMENT: Remove lock if Telegram failed, so the post can be retried later
             if not ignore_history:
                 async with async_session() as session:

@@ -50,32 +50,31 @@ query GetPostsByTag($tagName: String!, $page: Int) {
 }
 """
 
-# Fetch a single post by its global ID
+# Fetch a single post by its global ID (API exposes node, not post)
 GET_POST_QUERY = """
 query GetPost($id: ID!) {
-  post(id: $id) {
-    id
-    text
-    createdAt
-    nsfw
-    unsafe
-    postTags {
-      tag {
-        id
-        name
-      }
-    }
-    attributes {
-      __typename
-      ... on PostAttributePicture {
-        id
-        type
-        image {
+  node(id: $id) {
+    ... on Post {
+      id
+      text
+      createdAt
+      nsfw
+      unsafe
+      postTags {
+        tag {
           id
-          type
-          hasVideo
-          width
-          height
+          name
+        }
+      }
+      attributes {
+        __typename
+        ... on PostAttributePicture {
+          id
+          image {
+            id
+            hasVideo
+            type
+          }
         }
       }
     }
