@@ -123,17 +123,21 @@ async def select_tag(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"Что сделать с тегом *{tag}*?", parse_mode="Markdown", reply_markup=kb)
 
 @router.callback_query(F.data == "get_first_post")
-async def get_first_post_handler(callback: CallbackQuery, bot: Bot, post_service: PostService, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def get_first_post_handler(callback: CallbackQuery, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     await callback.answer()
     await callback.message.answer("Ищу подходящий пост...")
     
     async with async_session() as session:
         from app.db.repositories.chat_repository import ChatRepository
+        from app.db.repositories.post_repository import PostRepository
         config = await ChatRepository(session).get_config(callback.message.chat.id)
         
         from app.services.delivery_service import DeliveryService
         from app.services.media_manager import MediaManager
         
+        # PostService is not provided by aiogram DI: build it here from
+        # the injected APIQueue + JoyReactorClient and a session-bound repository.
+        post_service = PostService(jr_client, api_queue, PostRepository(session))
         media_manager = MediaManager()
         delivery = DeliveryService(bot, post_service, media_manager)
         

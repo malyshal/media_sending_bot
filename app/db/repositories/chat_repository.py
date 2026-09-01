@@ -1,8 +1,11 @@
 from typing import Optional, List
+import re
 from sqlalchemy import select, update, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.chat import ChatConfig
 from app.core.config import settings
+
+TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 class ChatRepository:
     def __init__(self, session: AsyncSession):
@@ -47,6 +50,9 @@ class ChatRepository:
         await self.session.commit()
 
     async def update_schedule(self, chat_id: int, schedule: str, timezone: str):
+        """Stores a daily delivery time. Only strict 'HH:MM' is accepted."""
+        if not TIME_PATTERN.match(schedule or ""):
+            raise ValueError(f"Invalid schedule format: {schedule!r}, expected 'HH:MM'")
         query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(
             schedule=schedule,
             timezone=timezone

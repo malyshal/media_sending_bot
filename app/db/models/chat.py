@@ -1,4 +1,5 @@
-from sqlalchemy import BigInteger, String, Integer, Boolean, DateTime, JSON
+from sqlalchemy import BigInteger, String, Integer, Boolean, DateTime
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 from .base import Base
@@ -14,11 +15,11 @@ class ChatConfig(Base):
     next_max_posts: Mapped[int] = mapped_column(Integer, default=1)
     
     # Filtering
-    include_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
-    exclude_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    include_tags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    exclude_tags: Mapped[list[str]] = mapped_column(JSONB, default=list)
     
     # Scheduling
-    # We can store the schedule as a cron string or a JSON list of times
+    # Single daily delivery time in "HH:MM" format (chat-local time)
     schedule: Mapped[str] = mapped_column(String, nullable=True) 
     timezone: Mapped[str] = mapped_column(String, default="UTC")
     

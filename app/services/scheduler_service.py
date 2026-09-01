@@ -48,12 +48,19 @@ class SchedulerService:
                     logger.info("scheduled_send_no_posts", chat_id=config.chat_id)
 
     def _should_send_now(self, config: ChatConfig, now_utc: datetime) -> bool:
+        if not config.schedule:
+            return False
+        # Schedule is stored in strict "HH:MM" format (see /settings).
+        # Anything else (e.g. legacy cron) is invalid -> skip and log.
+        parts = config.schedule.split(":")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            logger.error("invalid_schedule_format", chat_id=config.chat_id, schedule=config.schedule)
+            return False
         try:
             tz = zoneinfo.ZoneInfo(config.timezone)
             local_now = now_utc.astimezone(tz)
             
-            # Parse "HH:MM"
-            target_h, target_m = map(int, config.schedule.split(":"))
+            target_h, target_m = int(parts[0]), int(parts[1])
             
             # Check if we are in the target minute
             if local_now.hour == target_h and local_now.minute == target_m:
