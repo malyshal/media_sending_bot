@@ -1,18 +1,19 @@
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import structlog
-import zoneinfo
 
 from app.db.session import async_session
 from app.db.repositories.chat_repository import ChatRepository
 from app.db.repositories.user_repository import UserRepository
+from app.db.repositories.post_repository import PostRepository
 from app.queue.api_queue import APIQueue
 from app.joyreactor.client import JoyReactorClient
-from app.core.config import settings as app_settings
 from app.bot.states import ChatSettingsStates
 from app.bot.menu import home_back_button
+from app.bot.console import render_callback, render_message, prompt_input, delete_user_message, reset_state_keep_console
 
 logger = structlog.get_logger()
 router = Router()
@@ -32,33 +33,21 @@ def _tz_button_label(tz: str, current: str) -> str:
 
 
 @router.message(Command("settings"))
-async def cmd_settings(message: types.Message, state: FSMContext):
-    await state.clear()
+async def cmd_settings(message: types.Message, state: FSMContext, bot: Bot):
+    await reset_state_keep_console(state)
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(message.chat.id)
-        await message.answer(
-            build_settings_text(config),
-            parse_mode="Markdown",
-            reply_markup=build_settings_keyboard().as_markup(),
-        )
+        await render_message(bot, message, state, build_settings_text(config), build_settings_keyboard().as_markup())
 
 
-async def open_settings(callback: types.CallbackQuery):
-    """Renders the settings screen by editing the caller's message (single-message UX)."""
-    await callback.answer()
+async def open_settings(callback: types.CallbackQuery, state: FSMContext):
+    """Renders the settings screen into the console."""
+    await reset_state_keep_console(state)
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
-    try:
-        await callback.message.edit_text(
-            build_settings_text(config),
-            parse_mode="Markdown",
-            reply_markup=build_settings_keyboard().as_markup(),
-        )
-    except Exception:
-        # "message is not modified" is fine
-        pass
+    await render_callback(callback, state, build_settings_text(config), build_settings_keyboard().as_markup())
 
 
 def build_settings_text(config) -> str:
@@ -117,15 +106,14 @@ def build_tag_menu_keyboard(config) -> InlineKeyboardBuilder:
 
 
 async def open_tag_menu(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.clear()
+    await reset_state_keep_console(state)
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
-    await callback.message.answer(
+    await render_callback(
+        callback, state,
         build_tag_menu_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_tag_menu_keyboard(config).as_markup(),
+        build_tag_menu_keyboard(config).as_markup(),
     )
 
 
@@ -135,7 +123,7 @@ async def cb_open_tag_menu(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("tag_remove:"))
-async def cb_tag_remove(callback: types.CallbackQuery):
+async def cb_tag_remove(callback: types.CallbackQuery, state: FSMContext):
     tag = callback.data.split(":", 1)[1]
     chat_id = callback.message.chat.id
     async with async_session() as session:
@@ -145,15 +133,15 @@ async def cb_tag_remove(callback: types.CallbackQuery):
         await chat_repo.update_tags(chat_id, new_inc, config.exclude_tags)
         config = await chat_repo.get_config(chat_id)
     await callback.answer(f"«{tag}» удалён из include")
-    await callback.message.edit_text(
+    await render_callback(
+        callback, state,
         build_tag_menu_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_tag_menu_keyboard(config).as_markup(),
+        build_tag_menu_keyboard(config).as_markup(),
     )
 
 
 @router.callback_query(F.data.startswith("tag_unexclude:"))
-async def cb_tag_unexclude(callback: types.CallbackQuery):
+async def cb_tag_unexclude(callback: types.CallbackQuery, state: FSMContext):
     tag = callback.data.split(":", 1)[1]
     chat_id = callback.message.chat.id
     async with async_session() as session:
@@ -163,44 +151,82 @@ async def cb_tag_unexclude(callback: types.CallbackQuery):
         await chat_repo.update_tags(chat_id, config.include_tags, new_exc)
         config = await chat_repo.get_config(chat_id)
     await callback.answer(f"«{tag}» удалён из exclude")
-    await callback.message.edit_text(
+    await render_callback(
+        callback, state,
         build_tag_menu_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_tag_menu_keyboard(config).as_markup(),
+        build_tag_menu_keyboard(config).as_markup(),
     )
 
 
 @router.callback_query(F.data == "tag_start_search")
 async def cb_tag_start_search(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await prompt_input(callback, state, "Введите название тега для поиска:")
     await state.set_state(ChatSettingsStates.waiting_for_tag_search)
-    await callback.message.answer("Введите название тега для поиска:")
+
+
+async def _tag_autocomplete(message: types.Message, query: str, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+    """TS #56: search local cache first (case-insensitive, aggregated),
+    fall back to JoyReactor API only when local results are empty."""
+    async with async_session() as session:
+        repo = PostRepository(session)
+        local = await repo.search_local_tags(query, limit=6)
+
+    if local:
+        kb = InlineKeyboardBuilder()
+        for tag in local:
+            kb.button(text=tag, callback_data=f"tag_select:{tag}")
+        kb.adjust(1)
+        kb.row(home_back_button())
+        await render_message(
+            bot, message, state,
+            f"Найдено в кэше по запросу «{query}»:",
+            kb.as_markup(),
+            parse_mode=None,
+        )
+        return
+
+    # local cache empty -> JoyReactor API (through APIQueue, TS #22)
+    try:
+        tags = await api_queue.enqueue(jr_client.search_tags, query, priority=1)
+        if not tags:
+            await render_message(
+                bot, message, state,
+                f"По запросу «{query}» теги не найдены 😕 Попробуйте другой запрос.",
+                None,
+                parse_mode=None,
+            )
+            return
+
+        kb = InlineKeyboardBuilder()
+        for tag in tags[:6]:
+            kb.button(text=tag.name, callback_data=f"tag_select:{tag.name}")
+        kb.adjust(1)
+        kb.row(home_back_button())
+
+        await render_message(
+            bot, message, state,
+            f"Результаты API по запросу «{query}»:",
+            kb.as_markup(),
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.error("tag_search_failed", error=str(e))
+        await delete_user_message(message)
+        await message.answer("Произошла ошибка при поиске тегов.")
 
 
 @router.message(ChatSettingsStates.waiting_for_tag_search)
-async def proc_tag_search_from_menu(message: types.Message, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def proc_tag_search_from_menu(message: types.Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     query = (message.text or "").strip()
     if not query:
-        await message.answer("Введите текст запроса.")
+        await render_message(
+            bot, message, state,
+            "Введите текст запроса.",
+            None,
+            parse_mode=None,
+        )
         return
-    async with async_session() as session:
-        try:
-            tags = await api_queue.enqueue(jr_client.search_tags, query, priority=1)
-            if not tags:
-                await message.answer("Теги не найдены 😕")
-                return
-
-            kb = InlineKeyboardBuilder()
-            for tag in tags[:6]:
-                kb.button(text=tag.name, callback_data=f"tag_select:{tag.name}")
-            kb.adjust(1)
-            kb.row(home_back_button())
-
-            await message.answer(f"Результаты по запросу «{query}»:", reply_markup=kb.as_markup())
-            await state.clear()
-        except Exception as e:
-            logger.error("tag_search_failed", error=str(e))
-            await message.answer("Произошла ошибка при поиске тегов.")
+    await _tag_autocomplete(message, query, state, bot, api_queue, jr_client)
 
 
 @router.callback_query(F.data.startswith("tag_select:"))
@@ -215,7 +241,11 @@ async def cb_tag_selected(callback: types.CallbackQuery, state: FSMContext):
     kb.button(text="❌ Отмена", callback_data="tag_cancel")
     kb.adjust(1)
 
-    await callback.message.edit_text(f"Что сделать с тегом *{tag_name}*?", parse_mode="Markdown", reply_markup=kb.as_markup())
+    await render_callback(
+        callback, state,
+        f"Что сделать с тегом *{tag_name}*?",
+        kb.as_markup(),
+    )
 
 
 @router.callback_query(F.data == "tag_add_inc")
@@ -234,12 +264,12 @@ async def cb_tag_inc(callback: types.CallbackQuery, state: FSMContext):
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
         config = await chat_repo.get_config(chat_id)
 
-    await state.clear()
+    await reset_state_keep_console(state)
     await callback.answer(f"Тег «{tag}» добавлен в include ✅")
-    await callback.message.edit_text(
+    await render_callback(
+        callback, state,
         build_tag_menu_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_tag_menu_keyboard(config).as_markup(),
+        build_tag_menu_keyboard(config).as_markup(),
     )
 
 
@@ -259,26 +289,26 @@ async def cb_tag_exc(callback: types.CallbackQuery, state: FSMContext):
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
         config = await chat_repo.get_config(chat_id)
 
-    await state.clear()
+    await reset_state_keep_console(state)
     await callback.answer(f"Тег «{tag}» добавлен в exclude 🚫")
-    await callback.message.edit_text(
+    await render_callback(
+        callback, state,
         build_tag_menu_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_tag_menu_keyboard(config).as_markup(),
+        build_tag_menu_keyboard(config).as_markup(),
     )
 
 
 @router.callback_query(F.data == "tag_cancel")
 async def cb_tag_cancel(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
+    await reset_state_keep_console(state)
     await callback.answer("Действие отменено")
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
-    await callback.message.edit_text(
+    await render_callback(
+        callback, state,
         build_tag_menu_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_tag_menu_keyboard(config).as_markup(),
+        build_tag_menu_keyboard(config).as_markup(),
     )
 
 
@@ -314,19 +344,15 @@ def build_schedule_keyboard(config) -> InlineKeyboardBuilder:
 
 
 async def open_schedule_menu(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.clear()
+    await reset_state_keep_console(state)
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
-    try:
-        await callback.message.edit_text(
-            build_schedule_text(config),
-            parse_mode="Markdown",
-            reply_markup=build_schedule_keyboard(config).as_markup(),
-        )
-    except Exception:
-        pass
+    await render_callback(
+        callback, state,
+        build_schedule_text(config),
+        build_schedule_keyboard(config).as_markup(),
+    )
 
 
 @router.callback_query(F.data == "open_schedule")
@@ -335,7 +361,7 @@ async def cb_open_schedule(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "schedule_toggle")
-async def cb_schedule_toggle(callback: types.CallbackQuery):
+async def cb_schedule_toggle(callback: types.CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
     async with async_session() as session:
         chat_repo = ChatRepository(session)
@@ -349,29 +375,32 @@ async def cb_schedule_toggle(callback: types.CallbackQuery):
         config = await chat_repo.set_auto_send(chat_id, new_state)
 
     await callback.answer("Расписание включено 🟢" if new_state else "Расписание выключено 🔴")
-    try:
-        await callback.message.edit_text(
-            build_schedule_text(config),
-            parse_mode="Markdown",
-            reply_markup=build_schedule_keyboard(config).as_markup(),
-        )
-    except Exception:
-        pass
+    await render_callback(
+        callback, state,
+        build_schedule_text(config),
+        build_schedule_keyboard(config).as_markup(),
+    )
 
 
 @router.callback_query(F.data == "set_schedule_time")
 async def cb_set_schedule_time(callback: types.CallbackQuery, state: FSMContext):
+    await prompt_input(callback, state, "Введите время в формате HH:MM (например, 10:00):")
     await state.set_state(ChatSettingsStates.setting_schedule)
-    await callback.message.answer("Введите время в формате HH:MM (например, 10:00):")
-    await callback.answer()
 
 
 @router.message(ChatSettingsStates.setting_schedule)
-async def proc_set_schedule(message: types.Message, state: FSMContext):
+async def proc_set_schedule(message: types.Message, state: FSMContext, bot: Bot):
     import re
     time_pattern = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
     if not message.text or not re.match(time_pattern, message.text.strip()):
-        await message.answer("Неверный формат! Пожалуйста, введите время как HH:MM (например, 18:30).")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="open_schedule")
+        await render_message(
+            bot, message, state,
+            "Неверный формат! Введите время как HH:MM (например, 18:30), либо отмените.",
+            kb.as_markup(),
+            parse_mode=None,
+        )
         return
 
     chat_id = message.chat.id
@@ -381,18 +410,18 @@ async def proc_set_schedule(message: types.Message, state: FSMContext):
         await chat_repo.update_schedule(chat_id, message.text.strip(), config.timezone)
         config = await chat_repo.get_config(chat_id)
 
-    await state.clear()
-    await message.answer(
+    await reset_state_keep_console(state)
+    await render_message(
+        bot, message, state,
         f"✅ Время установлено: {config.schedule} ({config.timezone})\n\n" + build_schedule_text(config),
-        parse_mode="Markdown",
-        reply_markup=build_schedule_keyboard(config).as_markup(),
+        build_schedule_keyboard(config).as_markup(),
     )
 
 
 # ---------------------------------------------------------------- timezone presets
 
 @router.callback_query(F.data == "set_timezone")
-async def cb_set_timezone(callback: types.CallbackQuery):
+async def cb_set_timezone(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     chat_id = callback.message.chat.id
     async with async_session() as session:
@@ -403,15 +432,15 @@ async def cb_set_timezone(callback: types.CallbackQuery):
         kb.button(text=_tz_button_label(tz, config.timezone), callback_data=f"tz_select:{tz}")
     kb.adjust(1)
     kb.row(home_back_button())
-    await callback.message.answer(
+    await render_callback(
+        callback, state,
         f"🌍 Текущий часовой пояс: *{config.timezone}*\nВыберите из списка:",
-        parse_mode="Markdown",
-        reply_markup=kb.as_markup(),
+        kb.as_markup(),
     )
 
 
 @router.callback_query(F.data.startswith("tz_select:"))
-async def cb_tz_selected(callback: types.CallbackQuery):
+async def cb_tz_selected(callback: types.CallbackQuery, state: FSMContext):
     tz = callback.data.split(":", 1)[1]
     if tz not in TIMEZONE_PRESETS:
         await callback.answer("Недопустимый пояс", show_alert=True)
@@ -427,32 +456,37 @@ async def cb_tz_selected(callback: types.CallbackQuery):
             await chat_repo.set_timezone(chat_id, tz)
         config = await chat_repo.get_config(chat_id)
     await callback.answer(f"Часовой пояс: {tz}")
-    try:
-        await callback.message.edit_text(
-            build_settings_text(config),
-            parse_mode="Markdown",
-            reply_markup=build_settings_keyboard().as_markup(),
-        )
-    except Exception:
-        pass
+    await render_callback(
+        callback, state,
+        build_settings_text(config),
+        build_settings_keyboard().as_markup(),
+    )
 
 
 # ---------------------------------------------------------------- limits
 
 @router.callback_query(F.data == "set_schedule_max_posts")
 async def cb_set_schedule_max_posts(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(ChatSettingsStates.setting_schedule_max_posts)
-    await callback.message.answer(
-        "Введите лимит постов для регламентной отправки (число от 1 до 20):"
+    await prompt_input(
+        callback, state,
+        "Введите лимит постов для регламентной отправки (число от 1 до 20):",
+        parse_mode=None,
     )
-    await callback.answer()
+    await state.set_state(ChatSettingsStates.setting_schedule_max_posts)
 
 
 @router.message(ChatSettingsStates.setting_schedule_max_posts)
-async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext):
+async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext, bot: Bot):
     value = _parse_limit(message.text)
     if value is None:
-        await message.answer("Неверное значение! Введите целое число от 1 до 20.")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="home_settings")
+        await render_message(
+            bot, message, state,
+            "Неверное значение! Введите целое число от 1 до 20, либо отмените.",
+            kb.as_markup(),
+            parse_mode=None,
+        )
         return
 
     chat_id = message.chat.id
@@ -460,27 +494,36 @@ async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext)
         chat_repo = ChatRepository(session)
         config = await chat_repo.set_schedule_max_posts(chat_id, value)
 
-    await state.clear()
-    await message.answer(
-        f"📦 Лимит (Регламент) установлен: {config.schedule_max_posts} постов",
-        reply_markup=build_settings_keyboard().as_markup()
+    await reset_state_keep_console(state)
+    await render_message(
+        bot, message, state,
+        f"📦 Лимит (Регламент) установлен: {config.schedule_max_posts} постов\n\n" + build_settings_text(config),
+        build_settings_keyboard().as_markup(),
     )
 
 
 @router.callback_query(F.data == "set_next_max_posts")
 async def cb_set_next_max_posts(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(ChatSettingsStates.setting_next_max_posts)
-    await callback.message.answer(
-        "Введите лимит постов для команды /next (число от 1 до 20):"
+    await prompt_input(
+        callback, state,
+        "Введите лимит постов для команды /next (число от 1 до 20):",
+        parse_mode=None,
     )
-    await callback.answer()
+    await state.set_state(ChatSettingsStates.setting_next_max_posts)
 
 
 @router.message(ChatSettingsStates.setting_next_max_posts)
-async def proc_set_next_max_posts(message: types.Message, state: FSMContext):
+async def proc_set_next_max_posts(message: types.Message, state: FSMContext, bot: Bot):
     value = _parse_limit(message.text)
     if value is None:
-        await message.answer("Неверное значение! Введите целое число от 1 до 20.")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="home_settings")
+        await render_message(
+            bot, message, state,
+            "Неверное значение! Введите целое число от 1 до 20, либо отмените.",
+            kb.as_markup(),
+            parse_mode=None,
+        )
         return
 
     chat_id = message.chat.id
@@ -488,10 +531,11 @@ async def proc_set_next_max_posts(message: types.Message, state: FSMContext):
         chat_repo = ChatRepository(session)
         config = await chat_repo.set_next_max_posts(chat_id, value)
 
-    await state.clear()
-    await message.answer(
-        f"📩 Лимит (/next) установлен: {config.next_max_posts} постов",
-        reply_markup=build_settings_keyboard().as_markup()
+    await reset_state_keep_console(state)
+    await render_message(
+        bot, message, state,
+        f"📩 Лимит (/next) установлен: {config.next_max_posts} постов\n\n" + build_settings_text(config),
+        build_settings_keyboard().as_markup(),
     )
 
 
@@ -510,52 +554,36 @@ def _parse_limit(text: str | None) -> int | None:
 # ---------------------------------------------------------------- /search_tags (keep command from TS #56)
 
 @router.message(Command("search_tags"))
-async def cmd_search_tags(message: types.Message, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def cmd_search_tags(message: types.Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     if not message.text or len(message.text.split()) < 2:
+        await delete_user_message(message)
         await message.answer("Используйте: `/search_tags <запрос>` или добавьте теги через меню")
         return
 
     query = " ".join(message.text.split()[1:])
-    await state.set_state(ChatSettingsStates.waiting_for_tag_search)
-    await state.update_data(tag_query=query)
-
-    await process_tag_search(message, query, state, api_queue, jr_client)
-
-
-async def process_tag_search(message: types.Message, query: str, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
-    async with async_session() as session:
-        try:
-            tags = await api_queue.enqueue(jr_client.search_tags, query, priority=1)
-            if not tags:
-                await message.answer("Теги не найдены 😕")
-                return
-
-            kb = InlineKeyboardBuilder()
-            for tag in tags[:6]:
-                kb.button(text=tag.name, callback_data=f"tag_select:{tag.name}")
-            kb.adjust(1)
-            kb.row(home_back_button())
-
-            await message.answer(f"Результаты по запросу «{query}»:", reply_markup=kb.as_markup())
-        except Exception as e:
-            logger.error("tag_search_failed", error=str(e))
-            await message.answer("Произошла ошибка при поиске тегов.")
+    await _tag_autocomplete(message, query, state, bot, api_queue, jr_client)
 
 
 # ---------------------------------------------------------------- stop / delete data
 
 @router.message(Command("stop"))
-async def cmd_stop(message: types.Message):
+async def cmd_stop(message: types.Message, state: FSMContext, bot: Bot):
     chat_id = message.chat.id
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         await chat_repo.set_auto_send(chat_id, False)
-    await message.answer("🛑 Автоматическая рассылка выключена.")
+    await reset_state_keep_console(state)
+    await render_message(
+        bot, message, state,
+        "🛑 Автоматическая рассылка выключена.",
+        build_settings_keyboard().as_markup(),
+        parse_mode=None,
+    )
 
 
 @router.message(Command("delete_my_data"))
-async def cmd_delete_data(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
+async def cmd_delete_data(message: types.Message, state: FSMContext, bot: Bot):
+    await delete_user_message(message)
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Да, удалить", callback_data="confirm_delete_yes")
     kb.button(text="❌ Отмена", callback_data="confirm_delete_no")
@@ -571,17 +599,16 @@ async def cmd_delete_data(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "delete_my_data")
 async def cb_delete_my_data(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await state.set_state(ChatSettingsStates.confirm_deletion)
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Да, удалить", callback_data="confirm_delete_yes")
     kb.button(text="❌ Отмена", callback_data="confirm_delete_no")
-    await callback.message.answer(
+    await render_callback(
+        callback, state,
         "⚠️ *Внимание!*\n\nВы действительно хотите удалить все свои данные? "
         "Ваш аккаунт будет заморожен на 30 дней, после чего данные будут удалены окончательно.",
-        parse_mode="Markdown",
-        reply_markup=kb.as_markup()
+        kb.as_markup(),
     )
-    await state.set_state(ChatSettingsStates.confirm_deletion)
 
 
 @router.callback_query(F.data == "confirm_delete_yes")
@@ -596,18 +623,39 @@ async def cb_delete_yes(callback: types.CallbackQuery, state: FSMContext):
         await user_repo.request_deletion(user_id)
         await chat_repo.set_auto_send(chat_id, False)
 
-    await callback.message.edit_text("🗑 Данные заморожены. Вы можете отменить удаление в течение 30 дней с помощью `/restore`.")
-    await state.clear()
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as _B
+    kb = _B()
+    kb.button(text="🔄 Восстановить", callback_data="restore_account")
+    await callback.message.edit_text(
+        "🗑 Данные заморожены. Вы можете отменить удаление в течение 30 дней.",
+        reply_markup=kb.as_markup(),
+    )
+    await reset_state_keep_console(state)
 
 
 @router.callback_query(F.data == "confirm_delete_no")
 async def cb_delete_no(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Запрос на удаление отменен.")
-    await state.clear()
+    await reset_state_keep_console(state)
+
+
+@router.callback_query(F.data == "restore_account")
+async def cb_restore_account_settings(callback: CallbackQuery, state: FSMContext):
+    # Handles the "restore" button when the settings console is the active screen
+    # (onboarding router handles the same callback for the frozen-user flow first;
+    # aiogram dispatches to the first matching router, so this one rarely fires).
+    async with async_session() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_user(callback.from_user.id)
+        if user.is_frozen:
+            await user_repo.cancel_deletion(callback.from_user.id)
+            await callback.answer("Аккаунт восстановлен ✅", show_alert=True)
+        else:
+            await callback.answer("Аккаунт не заморожен")
 
 
 @router.message(Command("restore"))
-async def cmd_restore(message: types.Message):
+async def cmd_restore(message: types.Message, state: FSMContext, bot: Bot):
     user_id = message.from_user.id
 
     async with async_session() as session:
@@ -615,8 +663,16 @@ async def cmd_restore(message: types.Message):
         user = await user_repo.get_user(user_id)
 
         if not user.is_frozen:
+            await delete_user_message(message)
             await message.answer("Ваш аккаунт не находится в состоянии удаления.")
             return
 
         await user_repo.cancel_deletion(user_id)
-        await message.answer("✅ Удаление отменено! Ваши данные восстановлены.")
+        config = await ChatRepository(session).get_config(message.chat.id)
+
+    await reset_state_keep_console(state)
+    await render_message(
+        bot, message, state,
+        "✅ Удаление отменено! Ваши данные восстановлены.\n\n" + build_settings_text(config),
+        build_settings_keyboard().as_markup(),
+    )

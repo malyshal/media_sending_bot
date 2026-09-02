@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     max_media_size_mb: int = 50
     default_timezone: str = "Europe/Minsk"
     
+    # Queue backend (TS #66): 'memory' is the supported single-process mode.
+    # 'redis' is reserved for multi-instance scaling.
+    queue_type: str = "memory"
+    
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8",

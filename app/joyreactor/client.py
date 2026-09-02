@@ -102,6 +102,9 @@ class JoyReactorClient:
         Verified CDN patterns (numeric attribute id = <nid>):
           JPEG image:  https://img1.joyreactor.cc/pics/post/-<nid>.jpeg
           GIF/video:   https://img1.joyreactor.cc/pics/post/-<nid>.webm
+
+        Returns (media_url, media_type) with media_type in {"image", "video", "gif"}
+        per TS #12/#33.
         """
         for attr in attributes or []:
             if attr.get("__typename") != "PostAttributePicture":
@@ -114,10 +117,29 @@ class JoyReactorClient:
             has_video = bool(image.get("hasVideo"))
             media_type = (image.get("type") or "").upper()
             # Animated content (GIF/webm) served as .webm, static photos as .jpeg
-            if has_video or media_type == "GIF":
-                return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "video"
-            return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.jpeg", "photo"
+            if has_video:
+                return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "gif"
+            if media_type == "GIF":
+                return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "gif"
+            return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.jpeg", "image"
         return None, None
+
+    @staticmethod
+    def _all_media_urls(post_id: str, attributes: List[Dict[str, Any]]) -> list[tuple[str, str]]:
+        """All media items of the post in order (TS #83: text + multiple media)."""
+        result = []
+        for attr in attributes or []:
+            if attr.get("__typename") != "PostAttributePicture":
+                continue
+            numeric_id = JoyReactorClient._decode_global_id_static(attr.get("id", ""))
+            if not numeric_id.isdigit():
+                continue
+            image = attr.get("image", {}) or {}
+            if image.get("hasVideo") or (image.get("type") or "").upper() == "GIF":
+                result.append((f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "gif"))
+            else:
+                result.append((f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.jpeg", "image"))
+        return result
 
     @staticmethod
     def _decode_global_id_static(global_id: str) -> str:
@@ -140,6 +162,7 @@ class JoyReactorClient:
             return None
 
         media_url, media_type = self._media_from_attributes(post_data["id"], post_data.get("attributes", []))
+        media_urls = self._all_media_urls(post_data["id"], post_data.get("attributes", []))
 
         try:
             created_at = datetime.fromisoformat(post_data["createdAt"])
@@ -156,6 +179,7 @@ class JoyReactorClient:
             created_at=created_at,
             media_url=media_url,
             media_type=media_type,
+            media_urls=media_urls,
             raw_data=post_data
         )
 
@@ -186,8 +210,11 @@ class JoyReactorClient:
                 created_at=created_at,
                 media_url=media_url,
                 media_type=media_type,
+                media_urls=self._all_media_urls(p["id"], p.get("attributes", [])),
                 raw_data=p
             ))
+        from app.core.metrics import metrics
+        metrics.inc("posts_received", len(results))
         return results
 
     async def search_tags(self, mask: str) -> List[JRTag]:

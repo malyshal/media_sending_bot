@@ -3,12 +3,14 @@ from aiogram.filters import Command
 import structlog
 from app.services.delivery_service import DeliveryService
 from app.db.session import async_session
+from app.bot.console import delete_user_message
 
 logger = structlog.get_logger()
 router = Router()
 
 @router.message(Command("next"))
 async def cmd_next(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+    await delete_user_message(message)
     return await handle_next_request(message, bot, api_queue, jr_client)
 
 async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):

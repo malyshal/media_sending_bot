@@ -1,6 +1,9 @@
-from aiogram import Router, types
+from aiogram import Router, types, Bot
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 import structlog
+from app.bot.console import render_message, reset_state_keep_console
 
 logger = structlog.get_logger()
 router = Router()
@@ -20,5 +23,9 @@ def help_text() -> str:
 
 
 @router.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(help_text(), parse_mode="Markdown")
+async def cmd_help(message: types.Message, state: FSMContext, bot: Bot):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ В меню", callback_data="home")
+    kb.adjust(1)
+    await reset_state_keep_console(state)
+    await render_message(bot, message, state, help_text(), kb.as_markup())

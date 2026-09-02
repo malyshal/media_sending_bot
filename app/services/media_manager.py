@@ -16,24 +16,27 @@ class MediaManager:
     async def process_media(self, source_url: str, media_type: str) -> Tuple[Path, str]:
         file_ext = self._get_extension(media_type)
         temp_file = self.tmp_dir / f"src_{os.urandom(8).hex()}.{file_ext}"
-        
-        # 1. Streaming Download with size limit
+
+        # 1. Streaming download with size limit (TS #35)
         await self._download_file_stream(source_url, temp_file)
-        
-        # 2. Process based on type
+
+        # 2. Process based on type (TS #12: image | video | gif)
         if media_type == "webp":
             processed_file = await self._convert_webp(temp_file)
             if processed_file != temp_file:
-                os.remove(temp_file)
+                await asyncio.to_thread(os.remove, temp_file)
             return processed_file, "image/jpeg"
-            
+
         if media_type in ["mp4", "webm", "gif", "video"]:
+            # GIF/webm content is converted to MP4 for Telegram (TS #33)
             processed_file, final_mime = await self._compress_video(temp_file)
             if processed_file != temp_file:
-                os.remove(temp_file)
+                await asyncio.to_thread(os.remove, temp_file)
             return processed_file, final_mime
 
-        return temp_file, f"image/{file_ext}"
+        # image (jpeg/png) — no conversion needed
+        mime = f"image/{file_ext}" if file_ext in ("jpg", "png") else "image/jpeg"
+        return temp_file, mime
 
     async def _download_file_stream(self, url: str, dest: Path):
         # httpx connect from the long-lived polling loop intermittently fails
@@ -188,7 +191,7 @@ class MediaManager:
 
     def _get_extension(self, media_type: str) -> str:
         mapping = {
-            "png": "png", "jpeg": "jpg", "jpg": "jpg", "photo": "jpg",
+            "png": "png", "jpeg": "jpg", "jpg": "jpg", "image": "jpg",
             "webp": "webp", "gif": "gif", "mp4": "mp4", "webm": "webm",
             "video": "webm"
         }
@@ -197,6 +200,6 @@ class MediaManager:
     async def cleanup_file(self, path: Path):
         try:
             if path.exists():
-                os.remove(path)
+                await asyncio.to_thread(os.remove, path)
         except Exception as e:
             logger.error("file_cleanup_failed", path=str(path), error=str(e))

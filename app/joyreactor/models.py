@@ -24,7 +24,9 @@ class JRPost:
     created_at: datetime
     raw_data: Dict[str, Any]
     media_url: Optional[str] = None
-    media_type: Optional[str] = None  # "photo" or "video"
+    media_type: Optional[str] = None  # "image" | "video" | "gif"
+    # Ordered list of all media items (TS #83: text + multiple media)
+    media_urls: Optional[list] = None  # list[tuple[url, media_type]]
 
 @dataclass
 class JRTag:

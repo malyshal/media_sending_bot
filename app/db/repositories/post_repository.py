@@ -36,6 +36,23 @@ class PostRepository:
         result = await self.session.execute(query.limit(limit))
         return result.scalars().all()
 
+    async def search_local_tags(self, substring: str, limit: int = 10) -> List[str]:
+        """
+        Case-insensitive tag autocomplete over the local posts cache.
+        Aggregates unique tag names (TS #56: local search first, API fallback).
+        """
+        if not substring:
+            return []
+        sub = substring.strip().lower()
+        rows = await self.session.execute(select(Post.tags))
+        by_lower: dict[str, str] = {}  # lower -> original casing (first seen)
+        for (tags,) in rows:
+            for t in tags or []:
+                low = t.lower()
+                if sub in low and low not in by_lower:
+                    by_lower[low] = t
+        return sorted(by_lower.values(), key=lambda s: s.lower())[:limit]
+
     async def try_lock_post_for_chat(self, chat_id: int, post_id: str) -> bool:
         """
         Attempts to mark a post as sent using ON CONFLICT DO NOTHING.

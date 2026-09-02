@@ -43,3 +43,7 @@ env/
 # Logs
 *.log
 logs/
+
+# Runtime files
+tmp/
+*.pid

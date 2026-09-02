@@ -1,0 +1,42 @@
+# JoyBot systemd unit (TS #95) — primary production deployment for LXC.
+#
+# Install:
+#   1. Create user and directory:
+#        sudo useradd -r -s /usr/sbin/nologin joybot
+#        sudo mkdir -p /opt/joybot
+#   2. Copy the project to /opt/joybot and create the venv:
+#        sudo python3 -m venv /opt/joybot/venv
+#        sudo /opt/joybot/venv/bin/pip install .
+#   3. Put the real configuration in /opt/joybot/.env
+#   4. Install and start the service:
+#        sudo cp deploy/joybot.service /etc/systemd/system/
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now joybot
+#
+# Logs: journalctl -u joybot -f
+
+[Unit]
+Description=JoyBot Telegram bot (JoyReactor delivery)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=joybot
+Group=joybot
+WorkingDirectory=/opt/joybot
+EnvironmentFile=/opt/joybot/.env
+# Environment variables from EnvironmentFile are read by pydantic-settings.
+# DATABASE_URL and REDIS_URL must point to the real hosts for this deployment.
+ExecStart=/opt/joybot/venv/bin/python /opt/joybot/main.py
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,54 +1,134 @@
-# JoyBot 🤖
+# JoyBot — Telegram-бот доставки постов с JoyReactor
 
-Welcome to JoyBot — a professional Telegram bot that delivers content from joyreactor.cc based on user preferences and individual schedules.
+JoyBot — асинхронный Telegram-бот, который получает публикации с [joyreactor.cc](https://joyreactor.cc), фильтрует их по вашим тегам и доставляет в Telegram — вручную по команде или автоматически по расписанию.
 
-[Русская версия 🇷🇺](./README.ru.md)
+**Языки:** [Русский](README.md) (основной) · [English](README.en.md) · [Español](README.es.md)
 
-## ✨ Features
+---
 
-- **Smart Content Delivery**: Get the latest posts via `/next` or automatically according to your schedule.
-- **Advanced Filtering**: Custom "Include" and "Exclude" tag lists.
-- **Individual Scheduling**: Set your own delivery times and days, with full timezone support.
-- **Rate-Limit Protected**: A centralized API queue ensures the bot respects JoyReactor's limits.
-- **Production-Ready**: Distributed locking for post delivery, automatic cache cleanup, and structured logging.
-- **Privacy Focused**: Full data deletion with a 30-day recovery period.
+## Возможности
 
-## 🚀 Quick Start
+- 🔍 **Поиск по тегам** — интерактивное меню, локальный поиск в кэше + автодополнение через API JoyReactor;
+- 📥 **Include / 🚫 Exclude теги** — тонкая настройка ленты (логика `(include OR …) AND NOT (exclude OR …)`);
+- ▶️ **`/next`** — получить посты вручную (лимит настраивается);
+- ⏰ **Расписание** — ежедневная автоотправка в заданное время с часовым поясом чата и кнопкой Вкл/Выкл;
+- 🛡 **Защита от дублей** — атомарное резервирование постов в PostgreSQL (`INSERT … ON CONFLICT DO NOTHING`);
+- 🖼 **Медиа** — фото, GIF, видео: скачивание, конвертация GIF→MP4 через ffmpeg, отправка альбомов (текст + несколько медиа);
+- 🧹 **Автоочистка** — TTL кэша, ротация истории, GDPR-процедура удаления данных;
+- 📊 **Наблюдаемость** — `/stats` с состоянием системы и счётчиками событий;
+- 🚫 **Без спама** — история отправленных постов на каждый чат, race condition protection.
 
-### Environment Variables
-Create a `.env` file based on `.env.example`:
-- `BOT_TOKEN`: Your Telegram Bot token.
-- `DATABASE_URL`: PostgreSQL connection string.
-- `REDIS_URL`: Redis connection string (for queues/locks).
-- `API_REQUEST_INTERVAL`: Min interval between API requests (default: 2.0).
+## Команды
 
-### Installation
-Using Docker (recommended):
+Меню доступно при нажатии `/` или кнопки **Меню** рядом с полем ввода. Все настройки также доступны через inline-кнопки.
+
+| Команда | Описание |
+|---|---|
+| `/start` | Главное меню (и онбординг при первом запуске) |
+| `/next` | Получить посты по вашим тегам |
+| `/settings` | Настройки |
+| `/stop` | Выключить автоотправку |
+| `/help` | Справка |
+| `/delete_my_data` | Запросить удаление данных (30 дней на восстановление) |
+| `/restore` | Восстановить аккаунт |
+| `/search_tags <запрос>` | Поиск тегов |
+
+Административные: `/stats`, `/force_send <chat_id>`.
+
+## Быстрый старт (Docker — для тестирования)
+
 ```bash
-docker-compose up -d
+cp .env.example .env    # заполните BOT_TOKEN и адреса БД/Redis
+docker compose up -d
+docker compose logs -f bot
 ```
 
-Or manual installation:
+## Production (LXC, systemd — основной сценарий)
+
 ```bash
-pip install -r requirements.txt
-python main.py
+# 1. Пользователь и каталог
+sudo useradd -r -s /usr/sbin/nologin joybot
+sudo mkdir -p /opt/joybot
+
+# 2. Код и зависимости
+sudo cp -r . /opt/joybot
+cd /opt/joybot
+sudo python3 -m venv venv
+sudo ./venv/bin/pip install .
+
+# 3. Конфигурация
+sudo cp .env.example .env && sudo nano .env
+# DATABASE_URL и REDIS_URL должны указывать на реальные хосты PostgreSQL/Redis
+
+# 4. Схема БД: применить миграции Alembic
+sudo ./venv/bin/python -m app.db.migrations upgrade
+
+# 5. Сервис
+sudo cp deploy/joybot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now joybot
+sudo journalctl -u joybot -f
 ```
 
-## 🛠 Commands
+## Конфигурация (`.env`)
 
-- `/next` — Get the next matching post.
-- `/settings` — Manage tags, schedule, and auto-send toggle.
-- `/search_tags <query>` — Search for canonical tags on JoyReactor.
-- `/stop` — Disable automatic deliveries for the current chat.
-- `/delete_my_data` — Request permanent data deletion.
-- `/restore` — Cancel a pending deletion request.
-- `/stats` — (Admin only) System statistics.
-- `/force_send` — (Admin only) Force a post delivery to the current chat.
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `BOT_TOKEN` | — | Токен бота от [@BotFather](https://t.me/BotFather) |
+| `DATABASE_URL` | — | `postgresql+asyncpg://user:pass@host:5432/db` |
+| `REDIS_URL` | — | `redis://host:6379/0` |
+| `JOYREACTOR_BASE_URL` | `https://joyreactor.cc` | Сайт-источник |
+| `JOYREACTOR_API_URL` | `https://api.joyreactor.com/graphql` | GraphQL API |
+| `LOG_LEVEL` | `INFO` | Уровень логирования |
+| `CACHE_RETENTION_HOURS` | `6` | TTL кэша публикаций |
+| `MAX_FRESH_POSTS_FOR_BATCH` | `20` | Размер выборки из кэша |
+| `INITIAL_ADMIN_IDS` | `[]` | Telegram ID администраторов |
+| `DEFAULT_TIMEZONE` | `Europe/Minsk` | Часовой пояс по умолчанию |
+| `API_REQUEST_INTERVAL` | `2.5` | Пауза между запросами к API, сек |
+| `MAX_MEDIA_SIZE_MB` | `50` | Лимит размера медиа |
+| `QUEUE_TYPE` | `memory` | Очередь: `memory` (один процесс); `redis` зарезервирован |
 
-## 🏗 Architecture
+## Миграции БД
 
-- **Language**: Python 3.11+ (asyncio)
-- **Framework**: aiogram 3.x
-- **Database**: PostgreSQL 14+ (SQLAlchemy Async)
-- **Queue/Caching**: Redis / Asyncio PriorityQueue
-- **Media**: Pillow, FFmpeg (for optimization)
+Схема управляется **Alembic** (изменения только через миграции, TS #76):
+
+```bash
+python -m app.db.migrations upgrade     # применить все миграции
+python -m app.db.migrations current     # текущая ревизия
+python -m app.db.migrations revision "описание"   # создать миграцию (autogenerate)
+```
+
+## Архитектура
+
+```
+Telegram → Aiogram Handlers → Services → PostgreSQL
+                     │              │
+                     │              ├─ PostService → JoyReactorClient → APIQueue → JoyReactor API
+                     │              ├─ DeliveryService → MediaManager
+                     │              └─ SchedulerService → DeliveryService
+                     │
+                     └─ Redis (FSM)
+```
+
+- **Handlers** — Telegram-обновления, валидация, UI;
+- **Services** — бизнес-логика; **Repositories** — доступ к БД;
+- **APIQueue** — единая очередь к JoyReactor: rate limit, приоритеты, retry;
+- **MediaManager** — скачивание, обработка (ffmpeg/Pillow), очистка временных файлов.
+
+## Требования
+
+- Python 3.11+
+- PostgreSQL 14+
+- Redis
+- ffmpeg (для конвертации GIF/видео)
+
+## Тестирование
+
+```bash
+pip install pytest pytest-asyncio
+pytest tests/
+```
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).

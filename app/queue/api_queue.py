@@ -3,6 +3,7 @@ import structlog
 from typing import Any, Callable, Awaitable, NamedTuple, Optional
 from .base import BaseQueue
 from app.core.config import settings
+from app.core.metrics import metrics
 
 logger = structlog.get_logger()
 
@@ -39,18 +40,21 @@ class APIQueue(BaseQueue):
                 
                 try:
                     result = await request.task(*request.args, **request.kwargs)
+                    metrics.inc("api_requests")
                     if not request.future.done():
                         request.future.set_result(result)
                 except Exception as e:
                     if request.attempts < len(self._retry_delays):
                         delay = self._retry_delays[request.attempts]
                         logger.warning("api_request_retry", attempt=request.attempts+1, delay=delay, error=str(e))
+                        metrics.inc("api_retries")
                         
                         retry_request = request._replace(attempts=request.attempts + 1)
                         # Schedule retry
                         asyncio.create_task(self._schedule_retry(priority, retry_request, delay))
                     else:
                         logger.error("api_request_failed_after_retries", error=str(e))
+                        metrics.inc("api_failures")
                         if not request.future.done():
                             request.future.set_exception(e)
                 finally:

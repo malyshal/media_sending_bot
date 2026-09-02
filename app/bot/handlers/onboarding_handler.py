@@ -2,7 +2,8 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from app.bot.states import OnboardingStates, ChatSettingsStates
-from app.bot.menu import build_home_text, build_home_keyboard, home_back_button
+from app.bot.menu import build_home_text, build_home_keyboard
+from app.bot.console import render_callback, render_message, prompt_input, delete_user_message, reset_state_keep_console
 from app.db.session import async_session
 from app.db.repositories.user_repository import UserRepository
 from app.db.repositories.chat_repository import ChatRepository
@@ -17,10 +18,10 @@ router = Router()
 
 
 @router.message(F.text == "/start")
-async def cmd_start(message: Message, state: FSMContext):
-    # Reset any lingering FSM state: /start is the universal "home" action
-    await state.clear()
-    await state.set_data({})
+async def cmd_start(message: Message, state: FSMContext, bot: Bot):
+    # Reset any lingering FSM state: /start is the universal "home" action.
+    # Keeps the console reference so the existing screen gets edited, not duplicated.
+    await reset_state_keep_console(state)
 
     async with async_session() as session:
         user_repo = UserRepository(session)
@@ -33,10 +34,12 @@ async def cmd_start(message: Message, state: FSMContext):
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="🔄 Восстановить", callback_data="restore_account")
             ]])
-            await message.answer(
+            await render_message(
+                bot, message, state,
                 "Ваш аккаунт заморожен (запрошено удаление данных).\n"
                 "Вы можете восстановить его в течение 30 дней.",
-                reply_markup=kb,
+                kb,
+                parse_mode=None,
             )
             return
 
@@ -55,10 +58,10 @@ async def cmd_start(message: Message, state: FSMContext):
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔎 Найти тег", callback_data="find_tag")]
             ])
-            await message.answer(text, reply_markup=kb)
+            await render_message(bot, message, state, text, kb)
             await state.set_state(OnboardingStates.waiting_for_first_tag)
         else:
-            await message.answer(build_home_text(config), reply_markup=build_home_keyboard())
+            await render_message(bot, message, state, build_home_text(config), build_home_keyboard())
 
 
 @router.callback_query(F.data == "restore_account")
@@ -71,18 +74,22 @@ async def cb_restore_account(callback: CallbackQuery):
             await callback.answer("Аккаунт восстановлен ✅", show_alert=True)
         else:
             await callback.answer("Аккаунт не заморожен")
+    # Return to the home menu (settings router also handles this callback when
+    # its console exists; aiogram dispatches the first matching handler)
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
+    if config.include_tags:
+        await callback.message.edit_text(build_home_text(config), reply_markup=build_home_keyboard())
 
 
 @router.callback_query(F.data == "home")
 async def cb_home(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.clear()
+    await reset_state_keep_console(state)
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
-    await callback.message.edit_text(
-        build_home_text(config), reply_markup=build_home_keyboard()
-    )
+    await render_callback(callback, state, build_home_text(config), build_home_keyboard())
 
 
 @router.callback_query(F.data == "home_next")
@@ -111,37 +118,53 @@ async def cb_home_next(callback: CallbackQuery, bot: Bot, api_queue: 'APIQueue',
 
 @router.callback_query(F.data == "home_search_tags")
 async def cb_home_search_tags(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("Введите название тега для поиска:")
+    await prompt_input(callback, state, "Введите название тега для поиска:")
     await state.set_state(OnboardingStates.waiting_for_first_tag)
 
 
 @router.callback_query(F.data == "home_settings")
-async def cb_home_settings(callback: CallbackQuery):
+async def cb_home_settings(callback: CallbackQuery, state: FSMContext):
     from app.bot.handlers.settings_handler import open_settings
-    await open_settings(callback)
+    await open_settings(callback, state)
 
 
 @router.callback_query(F.data == "home_help")
-async def cb_home_help(callback: CallbackQuery):
-    await callback.answer()
+async def cb_home_help(callback: CallbackQuery, state: FSMContext):
     from app.bot.handlers.help_handler import help_text
-    await callback.message.answer(help_text(), reply_markup=None)
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ В меню", callback_data="home")
+    kb.adjust(1)
+    await render_callback(callback, state, help_text(), kb.as_markup())
 
 
 @router.callback_query(F.data == "find_tag")
 async def find_tag_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("Введите название тега для поиска:")
+    await prompt_input(callback, state, "Введите название тега для поиска:")
     await state.set_state(OnboardingStates.waiting_for_first_tag)
 
 
 @router.message(OnboardingStates.waiting_for_first_tag)
-async def process_tag_search(message: Message, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
-    query = message.text
+async def process_tag_search(message: Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+    query = (message.text or "").strip()
+    # TS #56: local cache search first, API fallback
+    from app.db.repositories.post_repository import PostRepository
+    async with async_session() as session:
+        local = await PostRepository(session).search_local_tags(query, limit=10)
+    if local:
+        kb_list = [[InlineKeyboardButton(text=t, callback_data=f"tag_select:{t}")] for t in local]
+        await render_message(
+            bot, message, state,
+            f"Найдено в кэше по запросу «{query}»:",
+            InlineKeyboardMarkup(inline_keyboard=kb_list),
+            parse_mode=None,
+        )
+        await state.set_state(OnboardingStates.selecting_tag)
+        return
     try:
         tags = await api_queue.enqueue(jr_client.search_tags, query)
         if not tags:
+            await delete_user_message(message)
             await message.answer("Ничего не найдено. Попробуйте другой запрос.")
             return
 
@@ -149,11 +172,16 @@ async def process_tag_search(message: Message, state: FSMContext, api_queue: 'AP
         for tag in tags[:10]:
             kb_list.append([InlineKeyboardButton(text=tag.name, callback_data=f"tag_select:{tag.name}")])
 
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
-        await message.answer(f"Найдены следующие теги по запросу «{query}»:", reply_markup=kb)
+        await render_message(
+            bot, message, state,
+            f"Найдены следующие теги по запросу «{query}»:",
+            InlineKeyboardMarkup(inline_keyboard=kb_list),
+            parse_mode=None,
+        )
         await state.set_state(OnboardingStates.selecting_tag)
     except Exception as e:
         logger.error("tag_search_error", error=str(e))
+        await delete_user_message(message)
         await message.answer("Произошла ошибка при поиске тегов. Попробуйте позже.")
 
 
@@ -202,16 +230,15 @@ async def get_first_post_handler(callback: CallbackQuery, bot: Bot, api_queue: '
 
 @router.callback_query(F.data == "change_tags")
 async def cb_change_tags(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
     # Open the tag management screen (search + current lists)
     from app.bot.handlers.settings_handler import open_tag_menu
     await open_tag_menu(callback, state)
 
 
 @router.callback_query(F.data == "go_to_settings")
-async def cb_go_to_settings(callback: CallbackQuery):
+async def cb_go_to_settings(callback: CallbackQuery, state: FSMContext):
     from app.bot.handlers.settings_handler import open_settings
-    await open_settings(callback)
+    await open_settings(callback, state)
 
 
 @router.callback_query(F.data == "set_schedule")
