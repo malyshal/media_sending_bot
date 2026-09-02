@@ -66,25 +66,18 @@ async def _send(bot: Bot, chat_id: int, state: FSMContext, text: str,
 
 
 async def render_callback(callback: CallbackQuery, state: FSMContext, text: str,
-                          keyboard: InlineKeyboardMarkup, parse_mode: str | None = "Markdown") -> Message:
-    """Callback path: edit the console in place; recreate only if it's lost."""
+                          keyboard: InlineKeyboardMarkup, parse_mode: str | None = "Markdown",
+                          refresh: bool = True) -> Message:
+    """Callback path: re-send the console at the bottom of the chat (delete the
+    old one first), so the history keeps only delivered posts. In-place editing
+    left the console buried under delivered posts."""
     await callback.answer()
     chat_id = callback.message.chat.id
     data = await state.get_data()
     console_id = data.get(CONSOLE_KEY)
 
-    if console_id:
-        # Buttons live on the console itself, so the cheap path is edit_text
-        try:
-            return await callback.message.edit_text(
-                text, parse_mode=parse_mode, reply_markup=keyboard
-            )
-        except Exception:
-            msg = await _edit(callback.bot, chat_id, console_id, text, keyboard, parse_mode)
-            if msg:
-                return msg
-        await _delete_by_id(callback.bot, chat_id, console_id)
-
+    await _delete_by_id(callback.bot, chat_id, console_id)
+    await state.update_data(**{CONSOLE_KEY: None})
     return await _send(callback.bot, chat_id, state, text, keyboard, parse_mode)
 
 

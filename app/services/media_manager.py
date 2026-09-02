@@ -48,7 +48,6 @@ class MediaManager:
     _good_ip: dict = {}
 
     def _download_file_sync(self, url: str, dest: Path):
-        import urllib.request
         from urllib.parse import urlparse
 
         parsed = urlparse(url)
@@ -97,7 +96,8 @@ class MediaManager:
         # Connect to the chosen IP but do TLS handshake with the real hostname
         raw = socket.create_connection((ip, 443), timeout=30)
         try:
-            tls = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+            from app.net.https import _sni_for
+            tls = ssl.create_default_context().wrap_socket(raw, server_hostname=_sni_for(host))
         except Exception:
             raw.close()
             raise

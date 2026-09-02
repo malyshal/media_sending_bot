@@ -23,6 +23,7 @@ class ChatRepository:
                 auto_send=False,
                 schedule_max_posts=3,
                 next_max_posts=1,
+                show_post_links=False,
                 include_tags=[],
                 exclude_tags=[],
                 schedule=None,
@@ -77,6 +78,13 @@ class ChatRepository:
         query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(
             schedule_max_posts=max(1, min(value, 20))
         )
+        await self.session.execute(query)
+        await self.session.commit()
+        return await self.get_config(chat_id)
+
+    async def set_show_post_links(self, chat_id: int, enabled: bool) -> ChatConfig:
+        await self.get_config(chat_id)
+        query = update(ChatConfig).where(ChatConfig.chat_id == chat_id).values(show_post_links=enabled)
         await self.session.execute(query)
         await self.session.commit()
         return await self.get_config(chat_id)

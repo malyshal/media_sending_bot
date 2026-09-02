@@ -1,0 +1,4 @@
+-- Migration: add show_post_links setting (append source post link to captions)
+
+ALTER TABLE chat_configs
+    ADD COLUMN IF NOT EXISTS show_post_links BOOLEAN NOT NULL DEFAULT FALSE;

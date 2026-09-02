@@ -13,6 +13,7 @@ class ChatConfig(Base):
     auto_send: Mapped[bool] = mapped_column(Boolean, default=False)
     schedule_max_posts: Mapped[int] = mapped_column(Integer, default=3)
     next_max_posts: Mapped[int] = mapped_column(Integer, default=1)
+    show_post_links: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Filtering
     include_tags: Mapped[list[str]] = mapped_column(JSONB, default=list)

@@ -78,6 +78,7 @@ async def cmd_force_send(message: types.Message, bot: Bot, api_queue: 'APIQueue'
             exclude_tags=config.exclude_tags,
             max_posts=config.schedule_max_posts,
             ignore_history=False,
+            show_links=config.show_post_links,
         )
 
     # TS #46: /force_send must NOT modify last_batch_time — it doesn't: only

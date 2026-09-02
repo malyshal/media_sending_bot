@@ -3,6 +3,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import asyncio
 import structlog
 
 from app.db.session import async_session
@@ -38,7 +39,7 @@ async def cmd_settings(message: types.Message, state: FSMContext, bot: Bot):
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(message.chat.id)
-        await render_message(bot, message, state, build_settings_text(config), build_settings_keyboard().as_markup())
+        await render_message(bot, message, state, build_settings_text(config), build_settings_keyboard(config).as_markup())
 
 
 async def open_settings(callback: types.CallbackQuery, state: FSMContext):
@@ -47,7 +48,7 @@ async def open_settings(callback: types.CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
-    await render_callback(callback, state, build_settings_text(config), build_settings_keyboard().as_markup())
+    await render_callback(callback, state, build_settings_text(config), build_settings_keyboard(config).as_markup())
 
 
 def build_settings_text(config) -> str:
@@ -58,23 +59,30 @@ def build_settings_text(config) -> str:
     else:
         schedule_line = f"🕒 Расписание: не задано ({config.timezone}) — выкл"
 
+    links_line = "🔗 Ссылки на посты: вкл" if config.show_post_links else "🔗 Ссылки на посты: выкл"
     return (
         f"⚙️ *Настройки JoyBot*\n\n"
         f"{schedule_line}\n"
         f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
         f"📩 Лимит (/next): {config.next_max_posts} постов\n"
+        f"{links_line}\n"
         f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
         f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
     )
 
 
-def build_settings_keyboard() -> InlineKeyboardBuilder:
+def build_settings_keyboard(config=None) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔍 Теги: поиск и удаление", callback_data="open_tag_menu")
+    kb.button(text="🏷 Управление тегами", callback_data="open_tag_menu")
     kb.button(text="⏰ Расписание (время / вкл-выкл)", callback_data="open_schedule")
     kb.button(text="🌍 Часовой пояс", callback_data="set_timezone")
     kb.button(text="📦 Лимит (Регламент)", callback_data="set_schedule_max_posts")
     kb.button(text="📩 Лимит (/next)", callback_data="set_next_max_posts")
+    show_links = getattr(config, "show_post_links", False) if config else False
+    kb.button(
+        text=("🔗 Ссылки на посты: выключить" if show_links else "🔗 Ссылки на посты: включить"),
+        callback_data="toggle_post_links",
+    )
     kb.button(text="🗑 Удалить мои данные", callback_data="delete_my_data")
     kb.button(text="⬅️ В меню", callback_data="home")
     kb.adjust(1)
@@ -169,7 +177,7 @@ async def _tag_autocomplete(message: types.Message, query: str, state: FSMContex
     fall back to JoyReactor API only when local results are empty."""
     async with async_session() as session:
         repo = PostRepository(session)
-        local = await repo.search_local_tags(query, limit=6)
+        local = await repo.search_local_tags(query, limit=8)
 
     if local:
         kb = InlineKeyboardBuilder()
@@ -198,7 +206,7 @@ async def _tag_autocomplete(message: types.Message, query: str, state: FSMContex
             return
 
         kb = InlineKeyboardBuilder()
-        for tag in tags[:6]:
+        for tag in tags[:8]:
             kb.button(text=tag.name, callback_data=f"tag_select:{tag.name}")
         kb.adjust(1)
         kb.row(home_back_button())
@@ -249,7 +257,7 @@ async def cb_tag_selected(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "tag_add_inc")
-async def cb_tag_inc(callback: types.CallbackQuery, state: FSMContext):
+async def cb_tag_inc(callback: types.CallbackQuery, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     data = await state.get_data()
     tag = data.get("selected_tag")
     chat_id = callback.message.chat.id
@@ -264,8 +272,18 @@ async def cb_tag_inc(callback: types.CallbackQuery, state: FSMContext):
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
         config = await chat_repo.get_config(chat_id)
 
+        # Canonical name resolution: if this query isn't a known API tag yet,
+        # schedule a background lookup (TS #24 rate limits apply).
+        from app.db.repositories.tag_alias_repository import TagAliasRepository
+        alias_repo = TagAliasRepository(session)
+        known = await alias_repo.get(tag)
+        if not known or not known.resolved:
+            from app.services.tag_resolver import TagResolverService
+            resolver = TagResolverService(None, api_queue, jr_client, None)
+            asyncio.create_task(resolver.resolve_pending(limit=1))
+            await callback.answer(f"Тег «{tag}» добавлен. Уточняю каноничное имя…")
+
     await reset_state_keep_console(state)
-    await callback.answer(f"Тег «{tag}» добавлен в include ✅")
     await render_callback(
         callback, state,
         build_tag_menu_text(config),
@@ -274,7 +292,7 @@ async def cb_tag_inc(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "tag_add_exc")
-async def cb_tag_exc(callback: types.CallbackQuery, state: FSMContext):
+async def cb_tag_exc(callback: types.CallbackQuery, state: FSMContext, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     data = await state.get_data()
     tag = data.get("selected_tag")
     chat_id = callback.message.chat.id
@@ -288,6 +306,15 @@ async def cb_tag_exc(callback: types.CallbackQuery, state: FSMContext):
 
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
         config = await chat_repo.get_config(chat_id)
+
+        from app.db.repositories.tag_alias_repository import TagAliasRepository
+        alias_repo = TagAliasRepository(session)
+        known = await alias_repo.get(tag)
+        if not known or not known.resolved:
+            from app.services.tag_resolver import TagResolverService
+            resolver = TagResolverService(None, api_queue, jr_client, None)
+            asyncio.create_task(resolver.resolve_pending(limit=1))
+            await callback.answer(f"Тег «{tag}» добавлен в exclude. Уточняю каноничное имя…")
 
     await reset_state_keep_console(state)
     await callback.answer(f"Тег «{tag}» добавлен в exclude 🚫")
@@ -459,7 +486,22 @@ async def cb_tz_selected(callback: types.CallbackQuery, state: FSMContext):
     await render_callback(
         callback, state,
         build_settings_text(config),
-        build_settings_keyboard().as_markup(),
+        build_settings_keyboard(config).as_markup(),
+    )
+
+
+@router.callback_query(F.data == "toggle_post_links")
+async def cb_toggle_post_links(callback: types.CallbackQuery, state: FSMContext):
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        config = await chat_repo.get_config(chat_id)
+        config = await chat_repo.set_show_post_links(chat_id, not config.show_post_links)
+    await callback.answer("Ссылки включены 🔗" if config.show_post_links else "Ссылки выключены")
+    await render_callback(
+        callback, state,
+        build_settings_text(config),
+        build_settings_keyboard(config).as_markup(),
     )
 
 
@@ -498,7 +540,7 @@ async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext,
     await render_message(
         bot, message, state,
         f"📦 Лимит (Регламент) установлен: {config.schedule_max_posts} постов\n\n" + build_settings_text(config),
-        build_settings_keyboard().as_markup(),
+        build_settings_keyboard(config).as_markup(),
     )
 
 
@@ -535,7 +577,7 @@ async def proc_set_next_max_posts(message: types.Message, state: FSMContext, bot
     await render_message(
         bot, message, state,
         f"📩 Лимит (/next) установлен: {config.next_max_posts} постов\n\n" + build_settings_text(config),
-        build_settings_keyboard().as_markup(),
+        build_settings_keyboard(config).as_markup(),
     )
 
 
@@ -576,7 +618,7 @@ async def cmd_stop(message: types.Message, state: FSMContext, bot: Bot):
     await render_message(
         bot, message, state,
         "🛑 Автоматическая рассылка выключена.",
-        build_settings_keyboard().as_markup(),
+        build_settings_keyboard(config).as_markup(),
         parse_mode=None,
     )
 
@@ -674,5 +716,5 @@ async def cmd_restore(message: types.Message, state: FSMContext, bot: Bot):
     await render_message(
         bot, message, state,
         "✅ Удаление отменено! Ваши данные восстановлены.\n\n" + build_settings_text(config),
-        build_settings_keyboard().as_markup(),
+        build_settings_keyboard(config).as_markup(),
     )

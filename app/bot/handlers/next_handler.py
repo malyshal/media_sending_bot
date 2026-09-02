@@ -40,8 +40,9 @@ async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQ
             include_tags=config.include_tags,
             exclude_tags=config.exclude_tags,
             max_posts=config.next_max_posts,
-            ignore_history=False
+            ignore_history=False,
+            show_links=config.show_post_links,
         )
         
         if sent_count == 0:
-            await message.answer("No new (unsent) posts found for your filters right now! 😢")
+            await message.answer("Не нашлось новых постов по вашим фильтрам 😢 Попробуйте позже или измените теги.")

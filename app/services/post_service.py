@@ -4,6 +4,7 @@ from app.joyreactor.models import JRPost
 from app.queue.api_queue import APIQueue
 from app.db.repositories.post_repository import PostRepository
 from app.db.models.post import Post
+from datetime import datetime
 import structlog
 
 logger = structlog.get_logger()
@@ -53,8 +54,28 @@ class PostService:
         unique_posts = {}
         for p in all_fetched_posts:
             unique_posts[p.id] = p
-        
-        # Apply EXCLUDE and check if sent
+
+        # TS #18: cache ALL fetched posts BEFORE selecting a candidate,
+        # so subsequent /next requests hit the local cache instead of the API.
+        from datetime import datetime as _dt
+        for jr_p in unique_posts.values():
+            if not jr_p.media_url:
+                continue
+            db_post = Post(
+                id=jr_p.id,
+                text=jr_p.text,
+                media_url=jr_p.media_url,
+                media_type=jr_p.media_type or "image",
+                tags=jr_p.tags,
+                created_at=jr_p.created_at,
+                # TS #14: cache TTL is measured from CACHING time (updated_at),
+                # not from the post's publication date.
+                updated_at=_dt.utcnow(),
+                raw_data=jr_p.raw_data
+            )
+            await self.repo.save_post(db_post)
+
+        # Select candidate from cached posts (exclude after API, TS #29)
         for jr_p in unique_posts.values():
             # Skip posts without resolvable media
             if not jr_p.media_url:
@@ -64,21 +85,18 @@ class PostService:
             # Check if post contains any exclude tags
             if any(ex_tag in jr_p.tags for ex_tag in exclude_tags):
                 continue
-                
-            # Map JRPost to DB Post
-            db_post = Post(
-                id=jr_p.id,
-                text=jr_p.text,
-                media_url=jr_p.media_url,
-                media_type=jr_p.media_type or "photo",
-                tags=jr_p.tags,
-                created_at=jr_p.created_at,
-                updated_at=jr_p.created_at,
-                raw_data=jr_p.raw_data
-            )
-            await self.repo.save_post(db_post)
-            
-            if ignore_history or not await self.repo.is_post_sent(chat_id, db_post.id):
+
+            if ignore_history or not await self.repo.is_post_sent(chat_id, jr_p.id):
+                db_post = await self.repo.save_post(Post(
+                    id=jr_p.id,
+                    text=jr_p.text,
+                    media_url=jr_p.media_url,
+                    media_type=jr_p.media_type or "image",
+                    tags=jr_p.tags,
+                    created_at=jr_p.created_at,
+                    updated_at=_dt.utcnow(),
+                    raw_data=jr_p.raw_data
+                ))
                 return db_post
                 
         return None

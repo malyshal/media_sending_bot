@@ -26,8 +26,7 @@ def build_home_text(config: ChatConfig) -> str:
 def build_home_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="▶️ Следующий пост", callback_data="home_next")
-    kb.button(text="🔍 Поиск тегов", callback_data="home_search_tags")
-    kb.button(text="⏰ Расписание", callback_data="home_schedule")
+    kb.button(text="🏷 Управление тегами", callback_data="home_tags")
     kb.button(text="⚙️ Настройки", callback_data="home_settings")
     kb.button(text="❓ Справка", callback_data="home_help")
     kb.adjust(1)

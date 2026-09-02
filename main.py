@@ -98,14 +98,33 @@ async def main():
     # Start background tasks (TS #39, #61)
     scheduler_task = asyncio.create_task(scheduler_loop(bot, global_queue, global_jr_client))
     cleanup_task = asyncio.create_task(cleanup_worker())
+
+    # Canonical tag resolution worker (runs alongside the scheduler every 60s)
+    from app.services.tag_resolver import TagResolverService
+
+    async def tag_resolver_loop():
+        from app.db.session import async_session as _sess
+        from app.db.repositories.post_repository import PostRepository
+        from app.services.post_service import PostService
+        while True:
+            try:
+                async with _sess() as session:
+                    ps = PostService(global_jr_client, global_queue, PostRepository(session))
+                    resolver = TagResolverService(bot, global_queue, global_jr_client, ps)
+                    await resolver.resolve_pending(limit=5)
+            except Exception as e:
+                logger.error("tag_resolver_loop_error", error=str(e))
+            await asyncio.sleep(60)
+
+    tag_resolver_task = asyncio.create_task(tag_resolver_loop())
     
     try:
         await dp.start_polling(bot)
     finally:
         # TS #68: graceful shutdown — close everything we opened
-        for task in (scheduler_task, cleanup_task):
+        for task in (scheduler_task, cleanup_task, tag_resolver_task):
             task.cancel()
-        for task in (scheduler_task, cleanup_task):
+        for task in (scheduler_task, cleanup_task, tag_resolver_task):
             try:
                 await task
             except asyncio.CancelledError:

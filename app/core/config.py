@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Queue backend (TS #66): 'memory' is the supported single-process mode.
     # 'redis' is reserved for multi-instance scaling.
     queue_type: str = "memory"
+
+    # TLS SNI overrides for proxy-based test deployments:
+    # "connect-host:sni-host", e.g. "host.docker.internal:api.joyreactor.com".
+    # Empty by default in production.
+    tls_sni_overrides: List[str] = []
     
     model_config = SettingsConfigDict(
         env_file=".env", 

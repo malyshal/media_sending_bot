@@ -37,7 +37,8 @@ class SchedulerService:
                     chat_id=config.chat_id,
                     include_tags=config.include_tags,
                     exclude_tags=config.exclude_tags,
-                    max_posts=config.schedule_max_posts
+                    max_posts=config.schedule_max_posts,
+                    show_links=config.show_post_links,
                 )
                 
                 if sent_count > 0:
