@@ -467,17 +467,13 @@ async def cb_smode(callback: types.CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
 
     if mode in ("hourly", "every_n_hours"):
-        # hourly modes: interval only, schedule holds the minute "HH:MM"
-        interval = (config.schedule_interval if False else 1)
+        # hourly modes: schedule holds only the minute as "*:MM"
         async with async_session() as session:
             chat_repo = ChatRepository(session)
             cfg = await chat_repo.get_config(chat_id)
             interval = cfg.schedule_interval or 1
             minute = cfg.schedule.split(":")[1] if cfg.schedule and ":" in cfg.schedule else "00"
-            if mode == "hourly":
-                schedule = f"*:{minute}"
-            else:
-                schedule = cfg.schedule or f"*:{minute}"
+            schedule = f"*:{minute}"
             await chat_repo.update_schedule(chat_id, schedule, cfg.timezone, mode, interval)
             config = await chat_repo.get_config(chat_id)
         kb = InlineKeyboardBuilder()
