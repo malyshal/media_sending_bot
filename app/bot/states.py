@@ -5,6 +5,7 @@ class ChatSettingsStates(StatesGroup):
     confirming_tag_action = State()
     setting_schedule = State()
     setting_schedule_max_posts = State()
+    setting_schedule_interval = State()
     setting_next_max_posts = State()
     confirm_deletion = State()
 

@@ -11,7 +11,7 @@ class ChatConfig(Base):
     
     # Delivery settings
     auto_send: Mapped[bool] = mapped_column(Boolean, default=False)
-    schedule_max_posts: Mapped[int] = mapped_column(Integer, default=3)
+    schedule_max_posts: Mapped[int] = mapped_column(Integer, default=100)
     next_max_posts: Mapped[int] = mapped_column(Integer, default=1)
     show_post_links: Mapped[bool] = mapped_column(Boolean, default=False)
     
@@ -20,8 +20,12 @@ class ChatConfig(Base):
     exclude_tags: Mapped[list[str]] = mapped_column(JSONB, default=list)
     
     # Scheduling
-    # Single daily delivery time in "HH:MM" format (chat-local time)
-    schedule: Mapped[str] = mapped_column(String, nullable=True) 
+    # schedule: "HH:MM" (chat-local time); for hourly modes the minute part is used
+    schedule: Mapped[str] = mapped_column(String, nullable=True)
+    # schedule_mode: daily | hourly | every_n_days | every_n_hours | weekly
+    schedule_mode: Mapped[str] = mapped_column(String, default="daily")
+    # schedule_interval: N for every_n_days/every_n_hours; weekday 0-6 (Mon=0) for weekly
+    schedule_interval: Mapped[int] = mapped_column(Integer, default=1)
     timezone: Mapped[str] = mapped_column(String, default="UTC")
     
     # Tracking

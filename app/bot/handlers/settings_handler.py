@@ -13,6 +13,7 @@ from app.db.repositories.post_repository import PostRepository
 from app.queue.api_queue import APIQueue
 from app.joyreactor.client import JoyReactorClient
 from app.bot.states import ChatSettingsStates
+from app.services.scheduler_service import VALID_MODES
 from app.bot.menu import home_back_button
 from app.bot.console import render_callback, render_message, prompt_input, delete_user_message, reset_state_keep_console
 
@@ -341,6 +342,35 @@ async def cb_tag_cancel(callback: types.CallbackQuery, state: FSMContext):
 
 # ---------------------------------------------------------------- schedule menu
 
+SCHEDULE_MODES = [
+    ("daily", "Каждый день"),
+    ("weekly", "Раз в неделю"),
+    ("every_n_days", "Раз в N дней"),
+    ("every_n_hours", "Раз в N часов"),
+    ("hourly", "Каждый час"),
+]
+MODE_LABEL = dict(SCHEDULE_MODES)
+WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _schedule_mode_line(config) -> str:
+    mode = config.schedule_mode or "daily"
+    interval = config.schedule_interval or 1
+    time_line = config.schedule or "не задано"
+    if mode == "daily":
+        return f"Каждый день в {time_line}"
+    if mode == "weekly":
+        day = WEEKDAY_NAMES[interval] if 0 <= interval <= 6 else "?"
+        return f"Раз в неделю ({day}) в {time_line}"
+    if mode == "every_n_days":
+        return f"Раз в {interval} дн. в {time_line}"
+    if mode == "every_n_hours":
+        return f"Раз в {interval} ч. (мин. {config.schedule[3:] if config.schedule else '00'})"
+    if mode == "hourly":
+        return f"Каждый час в мин. {config.schedule[3:] if config.schedule else '00'}"
+    return time_line
+
+
 def build_schedule_text(config) -> str:
     if config.auto_send:
         state_line = "🟢 Вкл"
@@ -348,13 +378,12 @@ def build_schedule_text(config) -> str:
             state_line += " (время не задано — включите после установки)"
     else:
         state_line = "🔴 Выкл"
-    time_line = config.schedule or "не задано"
     return (
         f"⏰ *Расписание автоотправки*\n\n"
         f"Состояние: {state_line}\n"
-        f"Время: {time_line} ({config.timezone})\n"
-        f"Лимит за раз: {config.schedule_max_posts} постов\n\n"
-        f"Бот отправит посты автоматически каждый день в указанное время."
+        f"Режим: {_schedule_mode_line(config)}\n"
+        f"Часовой пояс: {config.timezone}\n"
+        f"Лимит за раз: {config.schedule_max_posts} постов"
     )
 
 
@@ -364,7 +393,8 @@ def build_schedule_keyboard(config) -> InlineKeyboardBuilder:
         text=("🔴 Выключить" if config.auto_send else "🟢 Включить"),
         callback_data="schedule_toggle",
     )
-    kb.button(text="⏰ Изменить время", callback_data="set_schedule_time")
+    kb.button(text="📅 Режим расписания", callback_data="schedule_mode")
+    kb.button(text="⏰ Изменить время (HH:MM)", callback_data="set_schedule_time")
     kb.button(text="⬅️ В меню", callback_data="home")
     kb.adjust(1)
     return kb
@@ -409,6 +439,146 @@ async def cb_schedule_toggle(callback: types.CallbackQuery, state: FSMContext):
     )
 
 
+@router.callback_query(F.data == "schedule_mode")
+async def cb_schedule_mode(callback: types.CallbackQuery, state: FSMContext):
+    """Mode selection screen: pick mode, then interval if needed."""
+    await callback.answer()
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
+
+    kb = InlineKeyboardBuilder()
+    for mode, label in SCHEDULE_MODES:
+        marker = "✅ " if mode == (config.schedule_mode or "daily") else ""
+        kb.button(text=f"{marker}{label}", callback_data=f"smode:{mode}")
+    kb.adjust(1)
+    kb.row(home_back_button())
+    await render_callback(
+        callback, state,
+        "📅 *Режим расписания*\nВыберите периодичность:",
+        kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("smode:"))
+async def cb_smode(callback: types.CallbackQuery, state: FSMContext):
+    mode = callback.data.split(":", 1)[1]
+    if mode not in VALID_MODES:
+        await callback.answer("Неизвестный режим", show_alert=True)
+        return
+    chat_id = callback.message.chat.id
+
+    if mode in ("hourly", "every_n_hours"):
+        # hourly modes: interval only, schedule holds the minute "HH:MM"
+        interval = (config.schedule_interval if False else 1)
+        async with async_session() as session:
+            chat_repo = ChatRepository(session)
+            cfg = await chat_repo.get_config(chat_id)
+            interval = cfg.schedule_interval or 1
+            minute = cfg.schedule.split(":")[1] if cfg.schedule and ":" in cfg.schedule else "00"
+            if mode == "hourly":
+                schedule = f"*:{minute}"
+            else:
+                schedule = cfg.schedule or f"*:{minute}"
+            await chat_repo.update_schedule(chat_id, schedule, cfg.timezone, mode, interval)
+            config = await chat_repo.get_config(chat_id)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⏱ Изменить интервал (N)", callback_data="set_schedule_interval")
+        kb.button(text="⏰ Изменить время (минуты HH:MM)", callback_data="set_schedule_time")
+        kb.button(text="⬅️ К расписанию", callback_data="open_schedule")
+        kb.adjust(1)
+        await render_callback(
+            callback, state,
+            build_schedule_text(config),
+            kb.as_markup(),
+        )
+        return
+
+    if mode == "weekly":
+        # weekday selection
+        kb = InlineKeyboardBuilder()
+        for i, day in enumerate(WEEKDAY_NAMES):
+            kb.button(text=day, callback_data=f"swday:{i}")
+        kb.adjust(7)
+        kb.row(home_back_button())
+        await state.update_data(pending_mode=mode)
+        await render_callback(
+            callback, state,
+            "📅 Выберите день недели:",
+            kb.as_markup(),
+        )
+        return
+
+    # daily / every_n_days
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        cfg = await chat_repo.get_config(chat_id)
+        schedule = cfg.schedule or "12:00"
+        interval = cfg.schedule_interval or 1
+        tz = cfg.timezone
+        await chat_repo.update_schedule(chat_id, schedule, tz, mode, interval)
+        config = await chat_repo.get_config(chat_id)
+    await callback.answer("Режим установлен ✅")
+    await render_callback(
+        callback, state,
+        build_schedule_text(config),
+        build_schedule_keyboard(config).as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("swday:"))
+async def cb_sweekday(callback: types.CallbackQuery, state: FSMContext):
+    weekday = int(callback.data.split(":", 1)[1])
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        cfg = await chat_repo.get_config(chat_id)
+        schedule = cfg.schedule or "12:00"
+        tz = cfg.timezone
+        await chat_repo.update_schedule(chat_id, schedule, tz, "weekly", weekday)
+        config = await chat_repo.get_config(chat_id)
+    await callback.answer(f"День: {WEEKDAY_NAMES[weekday]}")
+    await render_callback(
+        callback, state,
+        build_schedule_text(config),
+        build_schedule_keyboard(config).as_markup(),
+    )
+
+
+@router.callback_query(F.data == "set_schedule_interval")
+async def cb_set_schedule_interval(callback: types.CallbackQuery, state: FSMContext):
+    await prompt_input(callback, state, "Введите N (целое число от 1 до 365):", parse_mode=None)
+    await state.set_state(ChatSettingsStates.setting_schedule_interval)
+
+
+@router.message(ChatSettingsStates.setting_schedule_interval)
+async def proc_set_schedule_interval(message: types.Message, state: FSMContext, bot: Bot):
+    text = (message.text or "").strip()
+    if not text.isdigit() or not (1 <= int(text) <= 365):
+        await delete_user_message(message)
+        await message.answer("Неверное значение! Введите целое число от 1 до 365.")
+        return
+    interval = int(text)
+    chat_id = message.chat.id
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        cfg = await chat_repo.get_config(chat_id)
+        mode = cfg.schedule_mode or "every_n_days"
+        if mode not in ("every_n_days", "every_n_hours"):
+            mode = "every_n_days"
+        schedule = cfg.schedule or ("12:00" if mode == "every_n_days" else "12:00")
+        await chat_repo.update_schedule(chat_id, schedule, cfg.timezone, mode, interval)
+        config = await chat_repo.get_config(chat_id)
+
+    await state.clear()
+    await render_message(
+        bot, message, state,
+        f"✅ Интервал установлен: {interval}\n\n" + build_schedule_text(config),
+        build_schedule_keyboard(config).as_markup(),
+        parse_mode=None,
+    )
+
+
 @router.callback_query(F.data == "set_schedule_time")
 async def cb_set_schedule_time(callback: types.CallbackQuery, state: FSMContext):
     await prompt_input(callback, state, "Введите время в формате HH:MM (например, 10:00):")
@@ -434,7 +604,13 @@ async def proc_set_schedule(message: types.Message, state: FSMContext, bot: Bot)
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
-        await chat_repo.update_schedule(chat_id, message.text.strip(), config.timezone)
+        new_schedule = message.text.strip()
+        mode = config.schedule_mode or "daily"
+        interval = config.schedule_interval or 1
+        # hourly modes store only the minute part
+        if mode in ("hourly", "every_n_hours"):
+            new_schedule = f"*:{new_schedule.split(':')[1]}"
+        await chat_repo.update_schedule(chat_id, new_schedule, config.timezone, mode, interval)
         config = await chat_repo.get_config(chat_id)
 
     await reset_state_keep_console(state)
@@ -511,7 +687,7 @@ async def cb_toggle_post_links(callback: types.CallbackQuery, state: FSMContext)
 async def cb_set_schedule_max_posts(callback: types.CallbackQuery, state: FSMContext):
     await prompt_input(
         callback, state,
-        "Введите лимит постов для регламентной отправки (число от 1 до 20):",
+        "Введите лимит постов для регламентной отправки (число от 1 до 100):",
         parse_mode=None,
     )
     await state.set_state(ChatSettingsStates.setting_schedule_max_posts)
@@ -519,13 +695,13 @@ async def cb_set_schedule_max_posts(callback: types.CallbackQuery, state: FSMCon
 
 @router.message(ChatSettingsStates.setting_schedule_max_posts)
 async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext, bot: Bot):
-    value = _parse_limit(message.text)
+    value = _parse_limit(message.text, max_value=100)
     if value is None:
         kb = InlineKeyboardBuilder()
         kb.button(text="❌ Отмена", callback_data="home_settings")
         await render_message(
             bot, message, state,
-            "Неверное значение! Введите целое число от 1 до 20, либо отмените.",
+            "Неверное значение! Введите целое число от 1 до 100, либо отмените.",
             kb.as_markup(),
             parse_mode=None,
         )
@@ -556,13 +732,13 @@ async def cb_set_next_max_posts(callback: types.CallbackQuery, state: FSMContext
 
 @router.message(ChatSettingsStates.setting_next_max_posts)
 async def proc_set_next_max_posts(message: types.Message, state: FSMContext, bot: Bot):
-    value = _parse_limit(message.text)
+    value = _parse_limit(message.text, max_value=20)
     if value is None:
         kb = InlineKeyboardBuilder()
         kb.button(text="❌ Отмена", callback_data="home_settings")
         await render_message(
             bot, message, state,
-            "Неверное значение! Введите целое число от 1 до 20, либо отмените.",
+            "Неверное значение! Введите целое число от 1 до 100, либо отмените.",
             kb.as_markup(),
             parse_mode=None,
         )
@@ -581,14 +757,14 @@ async def proc_set_next_max_posts(message: types.Message, state: FSMContext, bot
     )
 
 
-def _parse_limit(text: str | None) -> int | None:
+def _parse_limit(text: str | None, max_value: int = 20) -> int | None:
     if not text:
         return None
     text = text.strip()
     if not text.isdigit():
         return None
     value = int(text)
-    if value < 1 or value > 20:
+    if value < 1 or value > max_value:
         return None
     return value
 
