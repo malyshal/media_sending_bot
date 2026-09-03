@@ -5,8 +5,6 @@ from app.core.config import settings
 from .models import JRPost, JRTag
 from .queries import (SEARCH_TAGS_QUERY, FETCH_POSTS_QUERY, GET_POST_QUERY, SEARCH_POSTS_QUERY,
                       SEARCH_SIMILAR_QUERY, TAG_INFO_QUERY)
-from .extractor import JoyReactorExtractor
-import httpx
 import json
 import base64
 import structlog
@@ -25,8 +23,6 @@ class JoyReactorClient:
     def __init__(self):
         self.api_url = settings.joyreactor_api_url
         self.base_url = settings.joyreactor_base_url
-        self.extractor = JoyReactorExtractor(self.base_url)
-        
         self.headers = {
             "Origin": self.base_url,
             "Referer": f"{self.base_url}/",
@@ -35,70 +31,41 @@ class JoyReactorClient:
             "Accept": "application/json"
         }
         
-        self.timeout = httpx.Timeout(
-            timeout=10.0, 
-            connect=5.0, 
-            read=15.0, 
-            write=5.0, 
-            pool=5.0
-        )
-        
-        self.client = httpx.AsyncClient(
-            timeout=self.timeout,
-            headers=self.headers
-        )
 
     async def execute(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Single GraphQL request. Retries are owned by APIQueue (TS #26) —
+        no local retry loop here to avoid exponential retry multiplication."""
+        from app.net.https import https_request_sync
         payload = {"query": query, "variables": variables or {}}
-        
-        retries = 0
-        max_retries = 3
-        
-        while retries <= max_retries:
-            try:
-                # TLS handshake to the API host is flaky on some networks
-                # (Docker VM / LXC); the per-IP fallback transport is reliable.
-                import json as _json
-                from app.net.https import https_request_sync
-                body = _json.dumps(payload).encode("utf-8")
-                status, resp_headers, content = await asyncio.to_thread(
-                    https_request_sync, self.api_url, "POST", body,
-                    {"Content-Type": "application/json", "Accept": "application/json"},
-                    15.0, False,
-                )
+        body = json.dumps(payload).encode("utf-8")
 
-                if status == 429:
-                    logger.warning("rate_limit_exceeded", status_code=429, retry=retries)
-                    await asyncio.sleep(15)
-                    retries += 1
-                    continue
+        status, resp_headers, content = await asyncio.to_thread(
+            https_request_sync, self.api_url, "POST", body,
+            {"Content-Type": "application/json", "Accept": "application/json"},
+            15.0, False,
+        )
 
-                if status == 403:
-                    logger.error("joyreactor_api_forbidden", status_code=403, url=self.api_url)
-                    raise Exception("JoyReactor API returned 403 Forbidden")
+        if status == 429:
+            logger.warning("rate_limit_exceeded", status_code=429)
+            raise Exception("JoyReactor API rate limit (429)")
 
-                if status >= 400:
-                    raise Exception(f"HTTP {status}")
+        if status == 403:
+            logger.error("joyreactor_api_forbidden", status_code=403, url=self.api_url)
+            raise Exception("JoyReactor API returned 403 Forbidden")
 
-                data = json.loads(content.decode("utf-8"))
+        if status >= 400:
+            raise Exception(f"HTTP {status}")
 
-                if "errors" in data:
-                    logger.error("graphql_errors", errors=data["errors"], query=query[:100])
-                    raise Exception(f"GraphQL errors: {data['errors']}")
+        data = json.loads(content.decode("utf-8"))
 
-                return data.get("data", {})
+        if "errors" in data:
+            logger.error("graphql_errors", errors=data["errors"], query=query[:100])
+            raise Exception(f"GraphQL errors: {data['errors']}")
 
-            except Exception as e:
-                logger.error("request_error", error=str(e) or repr(e), retry=retries)
-                retries += 1
-                if retries > max_retries:
-                    raise
-                await asyncio.sleep(2 ** retries)
-
-        raise Exception("Max retries exceeded")
+        return data.get("data", {})
 
     async def close(self):
-        await self.client.aclose()
+        pass  # no persistent HTTP client: each request opens/closes its own connection
 
     def _decode_global_id(self, global_id: str) -> str:
         try:
@@ -163,9 +130,6 @@ class JoyReactorClient:
             return decoded.split(":")[-1] if ":" in decoded else decoded
         except Exception:
             return global_id
-
-    # alias for internal use
-    _decode_global_id_static = _decode_global_id_static
 
     async def fetch_post(self, post_id: str) -> Optional[JRPost]:
         """

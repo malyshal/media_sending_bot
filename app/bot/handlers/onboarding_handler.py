@@ -193,23 +193,6 @@ async def process_tag_search(message: Message, state: FSMContext, bot: Bot, api_
         )
 
 
-@router.callback_query(F.data.startswith("tag_select:"))
-async def select_tag(callback: CallbackQuery, state: FSMContext):
-    tag = callback.data.split(":", 1)[1]
-    await callback.answer()
-
-    await state.update_data(selected_tag=tag)
-    await state.set_state(ChatSettingsStates.confirming_tag_action)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить в INCLUDE", callback_data="tag_add_inc")],
-        [InlineKeyboardButton(text="🚫 Добавить в EXCLUDE", callback_data="tag_add_exc")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="tag_cancel")]
-    ])
-
-    await callback.message.edit_text(f"Что сделать с тегом *{tag}*?", parse_mode="Markdown", reply_markup=kb)
-
-
 @router.callback_query(F.data == "get_first_post")
 async def get_first_post_handler(callback: CallbackQuery, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     await callback.answer("Ищу подходящий пост...")

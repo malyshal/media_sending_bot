@@ -145,7 +145,6 @@ class MediaManager:
         parsed = urlparse(url)
         host = parsed.hostname
         ip_override = self._good_ip.get(host)
-        ip_override = self._good_ip.get(host)
 
         last_err: Exception | None = None
         candidates = [ip_override] if ip_override else self._resolve_ips(host)

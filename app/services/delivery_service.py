@@ -118,7 +118,7 @@ class DeliveryService:
                             else:
                                 raise
                         processed.append((path, mime))
-                    message = await self.send_media_group_with_tags(chat_id, processed, post, include_tags, exclude_tags)
+                    message = await self.send_media_group_with_tags(chat_id, processed, post, include_tags, exclude_tags, caption)
                     metrics.inc("posts_sent")
                     return message
                 finally:
@@ -201,9 +201,9 @@ class DeliveryService:
             items = [(post.media_url, post.media_type or "image")]
         return items[:10]
 
-    async def send_media_group_with_tags(self, chat_id: int, processed: list[tuple[Path, str]], post, include_tags: list | None = None, exclude_tags: list | None = None) -> types.Message:
+    async def send_media_group_with_tags(self, chat_id: int, processed: list[tuple[Path, str]], post, include_tags: list | None = None, exclude_tags: list | None = None, caption: str | None = None) -> types.Message:
         """Send album with tag keyboard on the last message."""
-        caption = _make_caption(post.text)
+        caption = caption if caption is not None else _make_caption(post.text)
         message = await self._send_media_group(chat_id, processed, caption)
         # Media group returns a list; attach tag keyboard to a follow-up mini message
         # is not possible on an album — send tags as a separate light message.
