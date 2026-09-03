@@ -1,6 +1,7 @@
 from typing import Optional
 import structlog
 from aiogram import Bot, types
+from aiogram.exceptions import TelegramBadRequest
 from app.services.post_service import PostService
 from app.services.media_manager import MediaManager
 from app.core.metrics import metrics
@@ -158,8 +159,6 @@ class DeliveryService:
                     raise
             processed_paths.append(processed_path)
 
-            processed_paths.append(processed_path)
-
             tag_kb = build_post_tags_keyboard(chat_id, post, include_tags, exclude_tags)
 
             if mime_type == "video/mp4":
@@ -186,6 +185,30 @@ class DeliveryService:
                 )
             metrics.inc("posts_sent")
             return message
+
+        except TelegramBadRequest as e:
+            if "IMAGE_PROCESS_FAILED" in str(e):
+                # Telegram can't process the image: fall back to plain text so
+                # the user still gets the post content.
+                logger.info("image_process_failed_text_fallback", chat_id=chat_id, post_id=post.id)
+                link = _post_link(post)
+                text = _make_caption(post.text, link if show_links else "")
+                if not text:
+                    text = f"🔗 {link}"
+                message = await self.bot.send_message(chat_id=chat_id, text=text)
+                metrics.inc("posts_sent")
+                return message
+            metrics.inc("delivery_failures")
+            logger.error(
+                "delivery_failed", chat_id=chat_id, post_id=post.id,
+                error=str(e) or repr(e), exc_type=type(e).__name__,
+            )
+            # Unlock so the post can be retried later if the failure was transient
+            if not ignore_history:
+                await self._unlock_post(chat_id, post.id)
+            # Broken candidate (dead CDN link, oversized media, Telegram refusal):
+            # signal the caller to try the next post instead of aborting.
+            raise _DeliveryRetryable() from e
 
         except Exception as e:
             metrics.inc("delivery_failures")
