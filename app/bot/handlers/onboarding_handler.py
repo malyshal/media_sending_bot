@@ -295,24 +295,41 @@ async def _resolve_tag(callback: CallbackQuery, state: FSMContext, post_num: str
         return None
 
 
+def _op_answer(new_state: str | None, tag: str) -> str:
+    if new_state == "include":
+        return f"«{tag}» добавлен ✅"
+    if new_state == "exclude":
+        return f"«{tag}» в исключениях 🚫"
+    return f"«{tag}» удалён ✅"
+
+
 async def _apply_tag_op(callback: CallbackQuery, state: FSMContext, op: str,
-                        chat_id: int, post_num: str, payload: str):
+                        chat_id: int, post_num: str, payload: str) -> tuple | None:
+    """Toggle a tag per-post (three states):
+    not added -> add to include (✅); added -> move to exclude (🚫);
+    excluded -> remove from exclude (➕)."""
     tag = await _resolve_tag(callback, state, post_num, payload)
     if not tag:
         await callback.answer("Не удалось определить тег", show_alert=True)
-        return None, None
+        return None
+    new_state = None
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
-        if op == "add":
+        if tag in config.include_tags:
+            new_inc = [t for t in config.include_tags if t != tag]
+            new_exc = list(set(config.exclude_tags + [tag]))
+            new_state = "exclude"
+        elif tag in config.exclude_tags:
+            new_exc = [t for t in config.exclude_tags if t != tag]
+            new_inc = list(config.include_tags)
+            new_state = "none"
+        else:
             new_inc = list(set(config.include_tags + [tag]))
             new_exc = [t for t in config.exclude_tags if t != tag]
-            await chat_repo.update_tags(chat_id, new_inc, new_exc)
-        else:
-            new_inc = [t for t in config.include_tags if t != tag]
-            new_exc = [t for t in config.exclude_tags if t != tag]
-            await chat_repo.update_tags(chat_id, new_inc, new_exc)
-    return config, tag
+            new_state = "include"
+        await chat_repo.update_tags(chat_id, new_inc, new_exc)
+    return new_state, tag
 
 
 async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, post_num: str, config):
@@ -336,22 +353,22 @@ async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, 
 async def cb_ptag_add(callback: CallbackQuery, state: FSMContext):
     _, chat_id_s, post_num, payload = callback.data.split(":", 3)
     chat_id = int(chat_id_s)
-    config, tag = await _apply_tag_op(callback, state, "add", chat_id, post_num, payload)
+    new_state, tag = await _apply_tag_op(callback, state, "add", chat_id, post_num, payload)
     if tag is None:
         return
-    await callback.answer(f"«{tag}» добавлен в include ✅")
-    _refresh_kb(callback, state, chat_id, post_num)
+    await callback.answer(_op_answer(new_state, tag))
+    await _refresh_kb(callback, state, chat_id, post_num)
 
 
 @router.callback_query(F.data.startswith("ptag_rem:"))
 async def cb_ptag_rem(callback: CallbackQuery, state: FSMContext):
     _, chat_id_s, post_num, payload = callback.data.split(":", 3)
     chat_id = int(chat_id_s)
-    config, tag = await _apply_tag_op(callback, state, "rem", chat_id, post_num, payload)
+    new_state, tag = await _apply_tag_op(callback, state, "rem", chat_id, post_num, payload)
     if tag is None:
         return
-    await callback.answer(f"«{tag}» удалён ✅")
-    _refresh_kb(callback, state, chat_id, post_num)
+    await callback.answer(_op_answer(new_state, tag))
+    await _refresh_kb(callback, state, chat_id, post_num)
 
 
 @router.callback_query(F.data.startswith("ptagi_add:"))
@@ -362,9 +379,11 @@ async def cb_ptagi_add(callback: CallbackQuery, state: FSMContext):
     if not tag:
         await callback.answer("Тег не найден", show_alert=True)
         return
-    config, _ = await _apply_tag_op(callback, state, "add", chat_id, post_num, tag)
-    await callback.answer(f"«{tag}» добавлен в include ✅")
-    _refresh_kb(callback, state, chat_id, post_num)
+    new_state, _ = await _apply_tag_op(callback, state, "add", chat_id, post_num, tag)
+    if new_state is None:
+        return
+    await callback.answer(_op_answer(new_state, tag))
+    await _refresh_kb(callback, state, chat_id, post_num)
 
 
 @router.callback_query(F.data.startswith("ptagi_rem:"))
@@ -375,9 +394,11 @@ async def cb_ptagi_rem(callback: CallbackQuery, state: FSMContext):
     if not tag:
         await callback.answer("Тег не найден", show_alert=True)
         return
-    config, _ = await _apply_tag_op(callback, state, "rem", chat_id, post_num, tag)
-    await callback.answer(f"«{tag}» удалён ✅")
-    _refresh_kb(callback, state, chat_id, post_num)
+    new_state, _ = await _apply_tag_op(callback, state, "rem", chat_id, post_num, tag)
+    if new_state is None:
+        return
+    await callback.answer(_op_answer(new_state, tag))
+    await _refresh_kb(callback, state, chat_id, post_num)
 
 
 @router.callback_query(F.data.startswith("ptag_all:"))
