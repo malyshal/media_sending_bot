@@ -121,7 +121,7 @@ async def cb_home_next(callback: CallbackQuery, state: FSMContext, bot: Bot, api
         from app.db.models.history import PostHistory as _PH
         q = _sel(Post).outerjoin(_PH, _PH.post_id == Post.id).where(
             _PH.post_id.is_(None)).order_by(Post.created_at.desc()).limit(5)
-        recent = (await s.execute(q)).scalars().all()
+        recent = (await session.execute(q)).scalars().all()
         for p in recent:
             tags = [t for t in (p.tags or []) if t]
             if tags:
@@ -234,7 +234,7 @@ async def get_first_post_handler(callback: CallbackQuery, state: FSMContext, bot
         from app.db.models.history import PostHistory as _PH
         q = _sel(Post).outerjoin(_PH, _PH.post_id == Post.id).where(
             _PH.post_id.is_(None)).order_by(Post.created_at.desc()).limit(5)
-        recent = (await s.execute(q)).scalars().all()
+        recent = (await session.execute(q)).scalars().all()
         for p in recent:
             tags = [t for t in (p.tags or []) if t]
             if tags:
@@ -319,6 +319,7 @@ async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, 
     """Rebuild the reply markup from the cache and store tags in FSM."""
     from app.bot.post_tag_keyboard import build_post_tags_keyboard, short_post_id
     async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
         post = await session.get(Post, _full_post_id(post_num))
     if not post:
         return
