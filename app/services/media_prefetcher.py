@@ -92,6 +92,7 @@ class MediaPrefetcher:
         """
         from app.joyreactor.models import JRPost
         from app.db.models.post import Post
+        from app.db.models.chat import ChatConfig
         from app.db.repositories.chat_repository import ChatRepository
 
         async with async_session() as session:
