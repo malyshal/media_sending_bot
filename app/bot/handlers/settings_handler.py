@@ -2,6 +2,7 @@ from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncio
 import structlog
@@ -20,13 +21,7 @@ from app.bot.console import render_callback, render_message, prompt_input, delet
 logger = structlog.get_logger()
 router = Router()
 
-TIMEZONE_PRESETS = [
-    "Europe/Minsk",
-    "Europe/Moscow",
-    "Europe/Kyiv",
-    "Europe/Berlin",
-    "UTC",
-]
+from app.bot.timezones import TIMEZONES, PAGE_SIZE
 
 
 def _tz_button_label(tz: str, current: str) -> str:
@@ -623,6 +618,26 @@ async def proc_set_schedule(message: types.Message, state: FSMContext, bot: Bot)
 
 # ---------------------------------------------------------------- timezone presets
 
+def _tz_page_keyboard(page: int, current: str) -> InlineKeyboardBuilder:
+    """Paginated timezone list: PAGE_SIZE buttons per page."""
+    kb = InlineKeyboardBuilder()
+    start = page * PAGE_SIZE
+    chunk = TIMEZONES[start:start + PAGE_SIZE]
+    for tz in chunk:
+        kb.button(text=_tz_button_label(tz, current), callback_data=f"tz_select:{tz}")
+    kb.adjust(1)
+    nav = []
+    total_pages = (len(TIMEZONES) + PAGE_SIZE - 1) // PAGE_SIZE
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"tz_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"tz_page:{page + 1}"))
+    kb.row(*nav)
+    kb.row(home_back_button())
+    return kb
+
+
 @router.callback_query(F.data == "set_timezone")
 async def cb_set_timezone(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -630,14 +645,24 @@ async def cb_set_timezone(callback: types.CallbackQuery, state: FSMContext):
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
 
-    kb = InlineKeyboardBuilder()
-    for tz in TIMEZONE_PRESETS:
-        kb.button(text=_tz_button_label(tz, config.timezone), callback_data=f"tz_select:{tz}")
-    kb.adjust(1)
-    kb.row(home_back_button())
+    kb = _tz_page_keyboard(0, config.timezone)
     await render_callback(
         callback, state,
-        f"🌍 Текущий часовой пояс: *{config.timezone}*\nВыберите из списка:",
+        f"🌍 Текущий часовой пояс: *{config.timezone}*\nВсе зоны России и Европы:",
+        kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("tz_page:"))
+async def cb_tz_page(callback: types.CallbackQuery, state: FSMContext):
+    page = int(callback.data.split(":", 1)[1])
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
+    kb = _tz_page_keyboard(page, config.timezone)
+    await render_callback(
+        callback, state,
+        f"🌍 Текущий часовой пояс: *{config.timezone}*\nВсе зоны России и Европы:",
         kb.as_markup(),
     )
 
@@ -645,7 +670,7 @@ async def cb_set_timezone(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("tz_select:"))
 async def cb_tz_selected(callback: types.CallbackQuery, state: FSMContext):
     tz = callback.data.split(":", 1)[1]
-    if tz not in TIMEZONE_PRESETS:
+    if tz not in TIMEZONES:
         await callback.answer("Недопустимый пояс", show_alert=True)
         return
     chat_id = callback.message.chat.id
@@ -841,6 +866,7 @@ async def cb_delete_yes(callback: types.CallbackQuery, state: FSMContext):
         await user_repo.request_deletion(user_id)
         await chat_repo.set_auto_send(chat_id, False)
 
+    from aiogram.types import InlineKeyboardButton
     from aiogram.utils.keyboard import InlineKeyboardBuilder as _B
     kb = _B()
     kb.button(text="🔄 Восстановить", callback_data="restore_account")
@@ -894,3 +920,7 @@ async def cmd_restore(message: types.Message, state: FSMContext, bot: Bot):
         "✅ Удаление отменено! Ваши данные восстановлены.\n\n" + build_settings_text(config),
         build_settings_keyboard(config).as_markup(),
     )
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(callback: types.CallbackQuery):
+    await callback.answer()

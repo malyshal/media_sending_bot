@@ -11,9 +11,10 @@ JoyBot es un bot asíncrono de Telegram que obtiene publicaciones de [joyreactor
 - 🔍 **Búsqueda de etiquetas** — menú interactivo, búsqueda local en caché + autocompletado vía API de JoyReactor;
 - 📥 **Etiquetas Include / 🚫 Exclude** — control fino del feed (`(include OR …) AND NOT (exclude OR …)`);
 - ▶️ **`/next`** — recibir publicaciones bajo demanda (límite configurable);
-- ⏰ **Horario** — envío automático diario a una hora fija con zona horaria por chat y botón de encendido/apagado;
+- ⏰ **Horario** — modos flexibles: diario, semanal, cada N días, cada hora, cada N horas — con zona horaria por chat y botón de encendido/apagado;
 - 🛡 **Sin duplicados** — reserva atómica de publicaciones en PostgreSQL (`INSERT … ON CONFLICT DO NOTHING`);
-- 🖼 **Multimedia** — fotos, GIFs, video: descarga, conversión GIF→MP4 con ffmpeg, envío de álbumes (texto + varios medios);
+- 🖼 **Multimedia** — fotos, GIFs, video: descarga, conversión GIF→MP4 con ffmpeg, envío de álbumes (texto + varios medios); los medios se cachean en disco (`MEDIA_DIR`) y se prefetchan en segundo plano — entrega instantánea;
+- 🏷 **Canonización de etiquetas** — las consultas del usuario se mapean automáticamente a nombres canónicos de la API en segundo plano;
 - 🧹 **Limpieza automática** — TTL de caché, rotación del historial, procedimiento de eliminación de datos (GDPR);
 - 📊 **Observabilidad** — `/stats` con el estado del sistema y contadores de eventos;
 - 🚫 **Anti-spam** — historial de envíos por chat, protección contra condiciones de carrera.
@@ -87,6 +88,7 @@ sudo journalctl -u joybot -f
 | `API_REQUEST_INTERVAL` | `2.5` | Pausa entre llamadas a la API, segundos |
 | `MAX_MEDIA_SIZE_MB` | `50` | Límite de tamaño de multimedia |
 | `QUEUE_TYPE` | `memory` | Cola: `memory` (un solo proceso); `redis` reservado |
+| `MEDIA_DIR` | `tmp/media` | Directorio de caché multimedia (se puede montar un disco externo) |
 
 ## Migraciones de la base de datos
 
@@ -121,6 +123,11 @@ Telegram → Aiogram Handlers → Services → PostgreSQL
 - PostgreSQL 14+
 - Redis
 - ffmpeg (para conversión de GIF/video)
+
+## Limitaciones conocidas
+
+- **Indexación de JoyReactor**: la API del sitio se actualiza con retraso (de minutos a varias horas). Las publicaciones y etiquetas más nuevas pueden aparecer en el bot más tarde que en el sitio web — espere y vuelva a intentarlo.
+- Las etiquetas se agregan tal cual; en segundo plano el bot las mapea a nombres canónicos de la API (p. ej. "тюлень" → `sea calf`).
 
 ## Pruebas
 

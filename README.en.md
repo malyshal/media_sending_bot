@@ -11,9 +11,10 @@ JoyBot is an async Telegram bot that fetches posts from [joyreactor.cc](https://
 - 🔍 **Tag search** — interactive menu, local cache search + JoyReactor API autocomplete;
 - 📥 **Include / 🚫 Exclude tags** — fine-grained feed control (`(include OR …) AND NOT (exclude OR …)`);
 - ▶️ **`/next`** — fetch posts on demand (configurable limit);
-- ⏰ **Schedule** — daily automatic delivery at a set time with per-chat timezone and an on/off toggle;
+- ⏰ **Schedule** — flexible modes: daily, weekly, every N days, hourly, every N hours — with per-chat timezone and an on/off toggle;
 - 🛡 **No duplicates** — atomic post reservation in PostgreSQL (`INSERT … ON CONFLICT DO NOTHING`);
-- 🖼 **Media** — photos, GIFs, video: download, GIF→MP4 conversion via ffmpeg, album delivery (text + multiple media);
+- 🖼 **Media** — photos, GIFs, video: download, GIF→MP4 conversion via ffmpeg, album delivery (text + multiple media); media is cached on disk (`MEDIA_DIR`) and prefetched in the background — instant delivery;
+- 🏷 **Tag canonicalization** — user queries are automatically mapped to canonical API tag names in the background;
 - 🧹 **Auto-cleanup** — cache TTL, history rotation, GDPR-style data deletion procedure;
 - 📊 **Observability** — `/stats` with system state and event counters;
 - 🚫 **Anti-spam** — per-chat delivery history, race condition protection.
@@ -87,6 +88,7 @@ sudo journalctl -u joybot -f
 | `API_REQUEST_INTERVAL` | `2.5` | Delay between API calls, seconds |
 | `MAX_MEDIA_SIZE_MB` | `50` | Media size limit |
 | `QUEUE_TYPE` | `memory` | Queue: `memory` (single process); `redis` reserved |
+| `MEDIA_DIR` | `tmp/media` | Media cache directory (mount an external disk) |
 
 ## Database migrations
 
@@ -121,6 +123,11 @@ Telegram → Aiogram Handlers → Services → PostgreSQL
 - PostgreSQL 14+
 - Redis
 - ffmpeg (for GIF/video conversion)
+
+## Known limitations
+
+- **JoyReactor indexing**: the site API updates with a delay (from minutes to a few hours). Brand-new posts and tags may appear in the bot later than on the website — wait and try again.
+- Tags are added as entered; in the background the bot maps them to canonical API tag names (e.g. "тюлень" → `sea calf`).
 
 ## Testing
 
