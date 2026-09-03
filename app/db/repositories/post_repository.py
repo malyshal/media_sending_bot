@@ -33,7 +33,9 @@ class PostRepository:
             exclude_filter = and_(*[~Post.tags.contains([t]) for t in exclude_tags])
             query = query.where(exclude_filter)
             
-        result = await self.session.execute(query.limit(limit))
+        result = await self.session.execute(
+            query.order_by(Post.created_at.desc()).limit(limit)
+        )
         return result.scalars().all()
 
     async def search_local_tags(self, substring: str, limit: int = 10) -> List[str]:

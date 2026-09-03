@@ -17,6 +17,11 @@ logger = structlog.get_logger()
 
 class JoyReactorClient:
     BASE_SEARCH = "https://joyreactor.cc/search"
+
+    @staticmethod
+    def _cdn_base() -> str:
+        """CDN host for media URLs (test deployments may proxy it)."""
+        return getattr(settings, "img_cdn_base", None) or "https://img1.joyreactor.cc"
     def __init__(self):
         self.api_url = settings.joyreactor_api_url
         self.base_url = settings.joyreactor_base_url
@@ -128,10 +133,10 @@ class JoyReactorClient:
             media_type = (image.get("type") or "").upper()
             # Animated content (GIF/webm) served as .webm, static photos as .jpeg
             if has_video:
-                return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "gif"
+                return f"{JoyReactorClient._cdn_base()}/pics/post/-{numeric_id}.webm", "gif"
             if media_type == "GIF":
-                return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "gif"
-            return f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.jpeg", "image"
+                return f"{JoyReactorClient._cdn_base()}/pics/post/-{numeric_id}.webm", "gif"
+            return f"{JoyReactorClient._cdn_base()}/pics/post/-{numeric_id}.jpeg", "image"
         return None, None
 
     @staticmethod
@@ -146,9 +151,9 @@ class JoyReactorClient:
                 continue
             image = attr.get("image", {}) or {}
             if image.get("hasVideo") or (image.get("type") or "").upper() == "GIF":
-                result.append((f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.webm", "gif"))
+                result.append((f"{JoyReactorClient._cdn_base()}/pics/post/-{numeric_id}.webm", "gif"))
             else:
-                result.append((f"https://img1.joyreactor.cc/pics/post/-{numeric_id}.jpeg", "image"))
+                result.append((f"{JoyReactorClient._cdn_base()}/pics/post/-{numeric_id}.jpeg", "image"))
         return result
 
     @staticmethod
@@ -274,11 +279,16 @@ class JoyReactorClient:
 
     async def search_tags(self, mask: str) -> List[JRTag]:
         """Tag suggestions matching the website search:
-        1. API prefix autocomplete (tagAutocomplete);
-        2. site /search/<query> page -> exact tag suggestions with counts
+        1. site /search/<query> page -> exact tag suggestions with counts
            (e.g. "тюлень" -> тюлень, тюлени, тюлень любви);
+        2. API prefix autocomplete (tagAutocomplete);
         3. search.similarQueries as fallback.
-        Deduplicated, site results first (they match what the user sees)."""
+        Deduplicated, site results first (they match what the user sees).
+
+        NOTE: this is a composite operation — one APIQueue entry that may
+        perform up to 3 HTTP calls internally. Nested enqueue calls into the
+        same queue would deadlock the single worker, so the composite stays
+        one task; per-HTTP-call rate limiting would require a redesign."""
         result: List[JRTag] = []
         seen: set = set()
 
@@ -353,3 +363,39 @@ class JoyReactorClient:
                     if t.get("name"):
                         out.append((t["name"], t.get("count") or 0))
         return out
+
+    # ------------------------------------------------ legacy/new CDN slugs
+
+    @staticmethod
+    async def resolve_media_via_post_page(post_id: str) -> Optional[List[tuple[str, str]]]:
+        """New JoyReactor posts use slugged CDN paths that depend on the post's
+        site tags, which the API does not expose. This fetches the public post
+        page and extracts the real media URLs. Returns [(url, type)] or None."""
+        import re as _re
+        import urllib.request as _req
+
+        try:
+            numeric = post_id
+            if post_id.startswith("UG9zdDo"):
+                numeric = base64.b64decode(post_id).decode().split(":", 1)[-1]
+            url = f"{JoyReactorClient.BASE_SEARCH.rsplit('/search', 1)[0]}/post/{numeric}"
+            request = _req.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            html = await asyncio.to_thread(lambda: _req.urlopen(request, timeout=20).read().decode("utf-8", "replace"))
+
+            urls = sorted(set(_re.findall(r'https://img[0-9]+\.joyreactor\.cc/pics/post/[^"\s]+', html)))
+            if not urls:
+                return None
+            items = []
+            for u in urls:
+                if "/webm/" in u:
+                    items.append((u, "gif"))
+                elif "/static/" in u:
+                    items.append((u, "image"))
+                elif u.endswith((".jpeg", ".jpg", ".png")):
+                    items.append((u, "image"))
+                elif u.endswith((".webm", ".mp4")):
+                    items.append((u, "gif"))
+            return items or None
+        except Exception as e:
+            logger.warning("resolve_via_post_page_failed", post_id=post_id, error=str(e))
+            return None

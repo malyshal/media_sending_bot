@@ -106,7 +106,17 @@ class DeliveryService:
                 processed = []
                 try:
                     for url, mtype in media_items:
-                        path, mime = await self._prepare_media(url, mtype)
+                        try:
+                            path, mime = await self._prepare_media(url, mtype)
+                        except Exception as e:
+                            if "HTTP 404" in str(e):
+                                resolved = await self.post_service.client.resolve_media_via_post_page(post.id)
+                                if not resolved:
+                                    raise
+                                url, mtype = resolved[0]
+                                path, mime = await self._prepare_media(url, mtype)
+                            else:
+                                raise
                         processed.append((path, mime))
                     message = await self.send_media_group_with_tags(chat_id, processed, post, include_tags, exclude_tags)
                     metrics.inc("posts_sent")
@@ -117,7 +127,21 @@ class DeliveryService:
                             await self.media_manager.cleanup_file(p)
 
             # Single media
-            processed_path, mime_type = await self._prepare_media(media_items[0][0], media_items[0][1])
+            try:
+                processed_path, mime_type = await self._prepare_media(media_items[0][0], media_items[0][1])
+            except Exception as e:
+                # New posts use slugged CDN paths not derivable from the API:
+                # resolve real media URLs from the public post page and retry.
+                if "HTTP 404" in str(e):
+                    resolved = await self.post_service.client.resolve_media_via_post_page(post.id)
+                    if resolved:
+                        logger.info("media_resolved_via_post_page", post_id=post.id, count=len(resolved))
+                        url2, mtype2 = resolved[0]
+                        processed_path, mime_type = await self._prepare_media(url2, mtype2)
+                    else:
+                        raise
+                else:
+                    raise
             processed_paths.append(processed_path)
 
             processed_paths.append(processed_path)
@@ -189,7 +213,11 @@ class DeliveryService:
         return message[0] if isinstance(message, list) else message
 
     async def _prepare_media(self, media_url: str, media_type: str) -> tuple[Path, str]:
-        prepared, mime = await self.media_manager.process_media(media_url, media_type)
+        # TS #22: ALL site traffic goes through the single APIQueue — including
+        # media downloads from the CDN. Priority 3 (lowest): users may wait.
+        prepared, mime = await self.post_service.queue.enqueue(
+            self.media_manager.process_media, media_url, media_type, priority=3
+        )
         return prepared, mime
 
     async def _send_media_group(self, chat_id: int, processed: list[tuple[Path, str]], caption: str) -> types.Message:

@@ -117,14 +117,33 @@ async def main():
             await asyncio.sleep(60)
 
     tag_resolver_task = asyncio.create_task(tag_resolver_loop())
+
+    # Media prefetcher: warms MEDIA_DIR so deliveries are instant (lowest priority)
+    from app.services.media_prefetcher import MediaPrefetcher
+    from app.services.media_manager import MediaManager
+
+    async def media_prefetch_loop():
+        from app.db.session import async_session as _sess
+        from app.db.repositories.post_repository import PostRepository
+        from app.services.post_service import PostService
+        mm = MediaManager()
+        prefetcher = MediaPrefetcher(bot, global_queue, global_jr_client, mm)
+        while True:
+            try:
+                await prefetcher.prefetch_cycle(limit=4)
+            except Exception as e:
+                logger.error("media_prefetch_loop_error", error=str(e))
+            await asyncio.sleep(120)
+
+    media_prefetch_task = asyncio.create_task(media_prefetch_loop())
     
     try:
         await dp.start_polling(bot)
     finally:
         # TS #68: graceful shutdown — close everything we opened
-        for task in (scheduler_task, cleanup_task, tag_resolver_task):
+        for task in (scheduler_task, cleanup_task, tag_resolver_task, media_prefetch_task):
             task.cancel()
-        for task in (scheduler_task, cleanup_task, tag_resolver_task):
+        for task in (scheduler_task, cleanup_task, tag_resolver_task, media_prefetch_task):
             try:
                 await task
             except asyncio.CancelledError:

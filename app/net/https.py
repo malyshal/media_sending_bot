@@ -24,13 +24,21 @@ _lock = threading.Lock()
 DEFAULT_TIMEOUT = 15.0
 
 
-def _sni_for(host: str) -> str:
-    """Real hostname for TLS handshake when connecting through a proxy."""
+def _sni_for(host: str, port: int | None = None) -> str:
+    """Real hostname for TLS handshake when connecting through a proxy.
+    Override format: "connect-host:port:sni" (port optional)."""
     for pair in getattr(settings, "tls_sni_overrides", []) or []:
-        if ":" in pair:
-            connect_host, sni = pair.split(":", 1)
-            if host == connect_host:
-                return sni
+        parts = pair.split(":")
+        if len(parts) == 2:
+            connect_host, sni = parts
+            port_match = True
+        elif len(parts) == 3:
+            connect_host, port_s, sni = parts
+            port_match = (str(port or "") == port_s)
+        else:
+            continue
+        if host == connect_host and port_match:
+            return sni
     return host
 
 
@@ -69,7 +77,7 @@ def https_request_sync(url: str, method: str = "GET", body: bytes | None = None,
     for ip in candidates:
         try:
             status, resp_headers, data = _request_via_ip(
-                ip, port, _sni_for(host), path, method, body, headers, timeout
+                ip, port, _sni_for(host, port), path, method, body, headers, timeout
             )
             if follow_redirects and status in (301, 302, 303, 307, 308):
                 loc = resp_headers.get("location") or resp_headers.get("Location")

@@ -5,6 +5,9 @@ services:
     build: .
     env_file:
       - .env
+    volumes:
+      # MEDIA_DIR: mount an external disk here in production (LXC)
+      - media_data:/app/tmp/media
     depends_on:
       - db
       - redis
@@ -33,3 +36,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  media_data:

@@ -82,5 +82,13 @@ async def cleanup_worker():
         except Exception as e:
             logger.error("deletion_purge_error", error=str(e))
 
+        # 3. Cached media files (on disk, MEDIA_DIR)
+        try:
+            from app.services.media_manager import MediaManager
+            mm = MediaManager()
+            await mm.cleanup_old_media()
+        except Exception as e:
+            logger.error("media_cleanup_error", error=str(e))
+
         # TS #61: run the cycle every 30 minutes
         await asyncio.sleep(CLEANUP_INTERVAL_MINUTES * 60)

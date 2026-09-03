@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # 'redis' is reserved for multi-instance scaling.
     queue_type: str = "memory"
 
+    # Media storage directory (mount an external disk here in production).
+    # Downloaded media is cached by URL hash and reused across deliveries.
+    media_dir: str = "tmp/media"
+
+    # Image CDN base (test deployments may point it at a local TCP proxy)
+    img_cdn_base: str | None = None
+
     # TLS SNI overrides for proxy-based test deployments:
     # "connect-host:sni-host", e.g. "host.docker.internal:api.joyreactor.com".
     # Empty by default in production.
