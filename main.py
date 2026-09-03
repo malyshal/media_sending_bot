@@ -130,6 +130,10 @@ async def main():
         prefetcher = MediaPrefetcher(bot, global_queue, global_jr_client, mm)
         while True:
             try:
+                await prefetcher.prefetch_posts()
+            except Exception as e:
+                logger.error("post_prefetch_loop_error", error=str(e))
+            try:
                 await prefetcher.prefetch_cycle(limit=4)
             except Exception as e:
                 logger.error("media_prefetch_loop_error", error=str(e))

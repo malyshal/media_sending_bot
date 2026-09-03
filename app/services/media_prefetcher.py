@@ -6,6 +6,9 @@ that /next and the scheduled delivery serve files from disk instantly
 users may wait).
 """
 import structlog
+from datetime import datetime
+
+from sqlalchemy import select
 
 from app.core.metrics import metrics
 from app.db.session import async_session
@@ -80,5 +83,52 @@ class MediaPrefetcher:
             items = [(post.media_url, post.media_type or "image")]
         return items[:10]
 
-    async def prefetch_cycle(self, limit: int = 6):
-        ...
+    async def prefetch_posts(self):
+        """Background fetch of NEW posts by the tags of active chats.
+
+        Keeps the cache warm for /next and scheduled delivery: posts are
+        fetched through the single APIQueue (priority 3) and cached before
+        any user asks for them.
+        """
+        from app.joyreactor.models import JRPost
+        from app.db.models.post import Post
+        from app.db.repositories.chat_repository import ChatRepository
+
+        async with async_session() as session:
+            rows = await session.execute(select(ChatConfig))
+            configs = rows.scalars().all()
+
+        tags: set[str] = set()
+        for cfg in configs:
+            if cfg.include_tags:
+                tags.update(cfg.include_tags)
+        if not tags:
+            tags = {"memes"}
+
+        cached = 0
+        for tag in tags:
+            try:
+                jr_posts = await self.api_queue.enqueue(
+                    self.jr_client.fetch_posts_by_tag, tag, priority=3
+                )
+            except Exception as e:
+                logger.error("post_prefetch_fetch_failed", tag=tag, error=str(e))
+                continue
+            for jr_p in jr_posts:
+                if not jr_p.media_url:
+                    continue
+                db_post = Post(
+                    id=jr_p.id,
+                    text=jr_p.text,
+                    media_url=jr_p.media_url,
+                    media_type=jr_p.media_type or "image",
+                    tags=jr_p.tags,
+                    created_at=jr_p.created_at,
+                    updated_at=datetime.utcnow(),
+                    raw_data=jr_p.raw_data,
+                )
+                async with async_session() as s2:
+                    await PostRepository(s2).save_post(db_post)
+            cached += len(jr_posts)
+        if cached:
+            logger.info("post_prefetch_cached", count=cached)
