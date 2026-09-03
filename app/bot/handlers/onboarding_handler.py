@@ -332,7 +332,7 @@ async def _apply_tag_op(callback: CallbackQuery, state: FSMContext, op: str,
     return new_state, tag
 
 
-async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, post_num: str, config):
+async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, post_num: str):
     """Rebuild the reply markup from the cache and store tags in FSM."""
     from app.bot.post_tag_keyboard import build_post_tags_keyboard, short_post_id
     async with async_session() as session:
