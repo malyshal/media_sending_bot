@@ -21,7 +21,7 @@ logger = structlog.get_logger()
 router = Router()
 
 
-@router.message(F.text == "/start")
+@router.message(F.text.startswith("/start"))
 async def cmd_start(message: Message, state: FSMContext, bot: Bot):
     # Reset any lingering FSM state: /start is the universal "home" action.
     # Keeps the console reference so the existing screen gets edited, not duplicated.
