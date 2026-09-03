@@ -34,15 +34,29 @@ class _DeliveryRetryable(Exception):
 
 
 import re as _re
+from bs4 import BeautifulSoup
+
 _ATTR_PLACEHOLDER = _re.compile(r"&attribute_insert_\d+&")
+
+
+def _clean_html(text: str) -> str:
+    """Strip HTML tags and decode entities: JoyReactor post text is HTML
+    (e.g. "<p>Drama Queen</p>"), Telegram captions must be plain text."""
+    if not text:
+        return ""
+    soup = BeautifulSoup(text, "html.parser")
+    plain = soup.get_text(separator="\n", strip=True)
+    return plain
 
 
 def _make_caption(text: Optional[str], link: str = "") -> str:
     """TS #34: post text as caption (+optional source link), truncated to the Telegram limit.
     The source link is always kept visible: text is truncated first.
     Media placeholders (&attribute_insert_N&) are removed — they mark where
-    media is inserted on the site and are not human-readable text."""
-    text = _ATTR_PLACEHOLDER.sub(" ", text or "").strip()
+    media is inserted on the site and are not human-readable text.
+    HTML markup (<p>...</p> etc.) is stripped to plain text."""
+    text = _ATTR_PLACEHOLDER.sub(" ", text or "")
+    text = BeautifulSoup(text, "html.parser").get_text(separator="\n", strip=True)
     if not text:
         return f"🔗 {link}" if link else ""
     link_block = f"\n\n🔗 {link}" if link else ""

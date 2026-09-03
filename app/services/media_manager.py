@@ -264,6 +264,7 @@ class MediaManager:
 
         cmd = [
             "ffmpeg", "-y", "-i", str(path),
+            "-vf", "scale=ceil(iw/2)*2:ceil(ih/2)*2",
             "-vcodec", "libx264", "-crf", "28",
             "-preset", "faster", "-movflags", "+faststart",
             "-acodec", "aac", "-strict", "experimental",

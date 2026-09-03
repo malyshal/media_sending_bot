@@ -1,3 +1,5 @@
+import asyncio
+
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -113,6 +115,17 @@ async def cb_home_next(callback: CallbackQuery, state: FSMContext, bot: Bot, api
             ignore_history=False,
             show_links=config.show_post_links,
         )
+        # Store tag lists of recent posts so index-based tag buttons resolve
+        from app.bot.post_tag_keyboard import short_post_id as _spid
+        from sqlalchemy import select as _sel
+        from app.db.models.history import PostHistory as _PH
+        q = _sel(Post).outerjoin(_PH, _PH.post_id == Post.id).where(
+            _PH.post_id.is_(None)).order_by(Post.created_at.desc()).limit(5)
+        recent = (await s.execute(q)).scalars().all()
+        for p in recent:
+            tags = [t for t in (p.tags or []) if t]
+            if tags:
+                await state.update_data(**{f"post_tags:{_spid(p.id)}": tags})
     if sent_count == 0:
         await send_ephemeral(
             bot, chat_id, state,
@@ -215,6 +228,17 @@ async def get_first_post_handler(callback: CallbackQuery, state: FSMContext, bot
             ignore_history=False,
             show_links=config.show_post_links,
         )
+        # Store tag lists of recent posts so index-based tag buttons resolve
+        from app.bot.post_tag_keyboard import short_post_id as _spid
+        from sqlalchemy import select as _sel
+        from app.db.models.history import PostHistory as _PH
+        q = _sel(Post).outerjoin(_PH, _PH.post_id == Post.id).where(
+            _PH.post_id.is_(None)).order_by(Post.created_at.desc()).limit(5)
+        recent = (await s.execute(q)).scalars().all()
+        for p in recent:
+            tags = [t for t in (p.tags or []) if t]
+            if tags:
+                await state.update_data(**{f"post_tags:{_spid(p.id)}": tags})
 
         if sent_count == 0:
             await send_ephemeral(
@@ -232,68 +256,145 @@ async def cb_change_tags(callback: CallbackQuery, state: FSMContext):
 
 # ---------------- per-post tag buttons ----------------
 
-async def _post_tags_kb(callback: CallbackQuery, chat_id: int, post_id: str) -> InlineKeyboardMarkup | None:
-    """Rebuild the post tag keyboard: post tags come from the cache."""
-    from app.bot.post_tag_keyboard import build_post_tags_keyboard
+def _full_post_id(post_num: str) -> str:
+    """Restore the global post id from its numeric part."""
+    import base64 as _b64
+    if post_num.isdigit():
+        return _b64.b64encode(f"Post:{post_num}".encode()).decode()
+    return post_num
+
+
+async def _load_post_and_config(chat_id: int, post_num: str):
+    """Post from cache by its global id + chat config."""
+    from app.db.session import async_session
+    from app.db.models.post import Post
+    from app.db.repositories.chat_repository import ChatRepository
+    async with async_session() as session:
+        post_id = _full_post_id(post_num)
+        post = await session.get(Post, post_id)
+        config = await ChatRepository(session).get_config(chat_id)
+    return post, config
+
+
+async def _store_post_tags(state: FSMContext, post_num: str, tags: list):
+    """Keep the post's tag list in FSM so index-based callbacks can resolve."""
+    await state.update_data(**{f"post_tags:{post_num}": tags})
+
+
+async def _resolve_tag(callback: CallbackQuery, state: FSMContext, post_num: str,
+                       payload: str) -> str | None:
+    """Resolve a tag from callback payload: either the tag text itself or an
+    index into the FSM-stored list."""
+    if not payload.isdigit():
+        return payload
+    data = await state.get_data()
+    tags = data.get(f"post_tags:{post_num}") or []
+    try:
+        return tags[int(payload)]
+    except (IndexError, TypeError):
+        return None
+
+
+async def _apply_tag_op(callback: CallbackQuery, state: FSMContext, op: str,
+                        chat_id: int, post_num: str, payload: str):
+    tag = await _resolve_tag(callback, state, post_num, payload)
+    if not tag:
+        await callback.answer("Не удалось определить тег", show_alert=True)
+        return None, None
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
-        post = await session.get(Post, post_id)
-    return build_post_tags_keyboard(chat_id, post, config.include_tags, config.exclude_tags)
+        if op == "add":
+            new_inc = list(set(config.include_tags + [tag]))
+            new_exc = [t for t in config.exclude_tags if t != tag]
+            await chat_repo.update_tags(chat_id, new_inc, new_exc)
+        else:
+            new_inc = [t for t in config.include_tags if t != tag]
+            new_exc = [t for t in config.exclude_tags if t != tag]
+            await chat_repo.update_tags(chat_id, new_inc, new_exc)
+    return config, tag
+
+
+async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, post_num: str, config):
+    """Rebuild the reply markup from the cache and store tags in FSM."""
+    from app.bot.post_tag_keyboard import build_post_tags_keyboard, short_post_id
+    async with async_session() as session:
+        post = await session.get(Post, _full_post_id(post_num))
+    if not post:
+        return
+    kb = build_post_tags_keyboard(chat_id, post, config.include_tags, config.exclude_tags)
+    tags = [t for t in (post.tags or []) if t]
+    await state.update_data(**{f"post_tags:{short_post_id(post.id)}": tags})
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("ptag_add:"))
 async def cb_ptag_add(callback: CallbackQuery, state: FSMContext):
-    _, chat_id_s, post_id, tag = callback.data.split(":", 3)
+    _, chat_id_s, post_num, payload = callback.data.split(":", 3)
     chat_id = int(chat_id_s)
-    async with async_session() as session:
-        chat_repo = ChatRepository(session)
-        config = await chat_repo.get_config(chat_id)
-        new_inc = list(set(config.include_tags + [tag]))
-        new_exc = [t for t in config.exclude_tags if t != tag]
-        await chat_repo.update_tags(chat_id, new_inc, new_exc)
+    config, tag = await _apply_tag_op(callback, state, "add", chat_id, post_num, payload)
+    if tag is None:
+        return
     await callback.answer(f"«{tag}» добавлен в include ✅")
-    kb = await _post_tags_kb(callback, chat_id, post_id)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=kb)
-    except Exception:
-        pass
+    _refresh_kb(callback, state, chat_id, post_num)
 
 
 @router.callback_query(F.data.startswith("ptag_rem:"))
 async def cb_ptag_rem(callback: CallbackQuery, state: FSMContext):
-    from app.bot.post_tag_keyboard import build_post_tags_keyboard
-    _, chat_id_s, post_id, tag = callback.data.split(":", 3)
+    _, chat_id_s, post_num, payload = callback.data.split(":", 3)
     chat_id = int(chat_id_s)
-    async with async_session() as session:
-        chat_repo = ChatRepository(session)
-        config = await chat_repo.get_config(chat_id)
-        new_inc = [t for t in config.include_tags if t != tag]
-        new_exc = [t for t in config.exclude_tags if t != tag]
-        await chat_repo.update_tags(chat_id, new_inc, new_exc)
+    config, tag = await _apply_tag_op(callback, state, "rem", chat_id, post_num, payload)
+    if tag is None:
+        return
     await callback.answer(f"«{tag}» удалён ✅")
-    kb = await _post_tags_kb(callback, chat_id, post_id)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=kb)
-    except Exception:
-        pass
+    _refresh_kb(callback, state, chat_id, post_num)
+
+
+@router.callback_query(F.data.startswith("ptagi_add:"))
+async def cb_ptagi_add(callback: CallbackQuery, state: FSMContext):
+    _, chat_id_s, post_num, idx = callback.data.split(":", 3)
+    chat_id = int(chat_id_s)
+    tag = await _resolve_tag(callback, state, post_num, idx)
+    if not tag:
+        await callback.answer("Тег не найден", show_alert=True)
+        return
+    config, _ = await _apply_tag_op(callback, state, "add", chat_id, post_num, tag)
+    await callback.answer(f"«{tag}» добавлен в include ✅")
+    _refresh_kb(callback, state, chat_id, post_num)
+
+
+@router.callback_query(F.data.startswith("ptagi_rem:"))
+async def cb_ptagi_rem(callback: CallbackQuery, state: FSMContext):
+    _, chat_id_s, post_num, idx = callback.data.split(":", 3)
+    chat_id = int(chat_id_s)
+    tag = await _resolve_tag(callback, state, post_num, idx)
+    if not tag:
+        await callback.answer("Тег не найден", show_alert=True)
+        return
+    config, _ = await _apply_tag_op(callback, state, "rem", chat_id, post_num, tag)
+    await callback.answer(f"«{tag}» удалён ✅")
+    _refresh_kb(callback, state, chat_id, post_num)
 
 
 @router.callback_query(F.data.startswith("ptag_all:"))
 async def cb_ptag_all(callback: CallbackQuery, state: FSMContext):
-    _, chat_id_s, post_id = callback.data.split(":", 2)
+    _, chat_id_s, post_num = callback.data.split(":", 2)
     chat_id = int(chat_id_s)
-    from app.bot.post_tag_keyboard import build_post_tags_keyboard
-    async with async_session() as session:
-        chat_repo = ChatRepository(session)
-        config = await chat_repo.get_config(chat_id)
-        post = await session.get(Post, post_id)
-    if post:
-        kb = build_post_tags_keyboard(chat_id, post, config.include_tags, config.exclude_tags, show_all=True)
-        try:
-            await callback.message.edit_reply_markup(reply_markup=kb)
-        except Exception:
-            pass
+    from app.bot.post_tag_keyboard import full_post_tags_keyboard
+    post, config = await _load_post_and_config(chat_id, post_num)
+    if not post:
+        await callback.answer("Пост уже не в кэше", show_alert=True)
+        return
+    tags = [t for t in (post.tags or []) if t]
+    await state.update_data(**{f"post_tags:{post_num}": tags})
+    kb = full_post_tags_keyboard(chat_id, post, config.include_tags, config.exclude_tags)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
     await callback.answer()
 
 
