@@ -16,7 +16,8 @@ from app.joyreactor.client import JoyReactorClient
 from app.bot.states import ChatSettingsStates
 from app.services.scheduler_service import VALID_MODES
 from app.bot.menu import home_back_button
-from app.bot.console import render_callback, render_message, prompt_input, delete_user_message, reset_state_keep_console
+from app.bot.console import (render_callback, render_message, prompt_input, delete_user_message,
+                            reset_state_keep_console, send_ephemeral)
 
 logger = structlog.get_logger()
 router = Router()
@@ -215,8 +216,10 @@ async def _tag_autocomplete(message: types.Message, query: str, state: FSMContex
         )
     except Exception as e:
         logger.error("tag_search_failed", error=str(e))
-        await delete_user_message(message)
-        await message.answer("Произошла ошибка при поиске тегов.")
+        await send_ephemeral(
+            bot, message.chat.id, state,
+            "Произошла ошибка при поиске тегов. Попробуйте позже.",
+        )
 
 
 @router.message(ChatSettingsStates.waiting_for_tag_search)
@@ -550,8 +553,14 @@ async def cb_set_schedule_interval(callback: types.CallbackQuery, state: FSMCont
 async def proc_set_schedule_interval(message: types.Message, state: FSMContext, bot: Bot):
     text = (message.text or "").strip()
     if not text.isdigit() or not (1 <= int(text) <= 365):
-        await delete_user_message(message)
-        await message.answer("Неверное значение! Введите целое число от 1 до 365.")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="open_schedule")
+        await render_message(
+            bot, message, state,
+            "Неверное значение! Введите целое число от 1 до 365, либо отмените.",
+            kb.as_markup(),
+            parse_mode=None,
+        )
         return
     interval = int(text)
     chat_id = message.chat.id
@@ -645,12 +654,47 @@ async def cb_set_timezone(callback: types.CallbackQuery, state: FSMContext):
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
 
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🕐 Указать своё текущее время", callback_data="tz_auto")
+    kb.button(text="🌍 Выбрать из списка", callback_data="tz_list")
+    kb.adjust(1)
+    kb.row(home_back_button())
+    await render_callback(
+        callback, state,
+        f"🌍 Текущий часовой пояс: *{config.timezone}*\n\n"
+        f"Как определить зону?\n"
+        f"• 🕐 Указать время — отправьте текущее локальное время (HH:MM), "
+        f"бот сам определит ваш часовой пояс;\n"
+        f"• 🌍 Список — выбрать зону вручную (России и Европы).",
+        kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data == "tz_list")
+async def cb_tz_list(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
     kb = _tz_page_keyboard(0, config.timezone)
     await render_callback(
         callback, state,
-        f"🌍 Текущий часовой пояс: *{config.timezone}*\nВсе зоны России и Европы:",
+        f"🌍 Все зоны России и Европы:",
         kb.as_markup(),
     )
+
+
+@router.callback_query(F.data == "tz_auto")
+async def cb_tz_auto(callback: types.CallbackQuery, state: FSMContext):
+    await prompt_input(
+        callback, state,
+        "🕐 Отправьте текущее локальное время в формате HH:MM "
+        "(например, 14:35) — бот определит вашу зону:",
+    )
+    await state.set_state(ChatSettingsStates.setting_tz_auto)
+
+
+
 
 
 @router.callback_query(F.data.startswith("tz_page:"))
@@ -799,8 +843,10 @@ def _parse_limit(text: str | None, max_value: int = 20) -> int | None:
 @router.message(Command("search_tags"))
 async def cmd_search_tags(message: types.Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     if not message.text or len(message.text.split()) < 2:
-        await delete_user_message(message)
-        await message.answer("Используйте: `/search_tags <запрос>` или добавьте теги через меню")
+        await send_ephemeral(
+            bot, message.chat.id, state,
+            "Используйте: /search_tags <запрос> или добавьте теги через меню",
+        )
         return
 
     query = " ".join(message.text.split()[1:])
@@ -924,3 +970,89 @@ async def cmd_restore(message: types.Message, state: FSMContext, bot: Bot):
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: types.CallbackQuery):
     await callback.answer()
+
+
+@router.message(ChatSettingsStates.setting_tz_auto)
+async def proc_tz_auto(message: types.Message, state: FSMContext, bot: Bot):
+    """Auto-detect the user's timezone from their current local time."""
+    import re as _re
+    from datetime import datetime, timezone as _tz_utc
+    import zoneinfo as _zi
+    from app.bot.timezones import TIMEZONES
+
+    text = (message.text or "").strip()
+    if not _re.match(r"^(?:[01]\d|2[0-3]):[0-5]\d$", text):
+        await delete_user_message(message)
+        await message.answer("Неверный формат! Отправьте время как HH:MM (например, 14:35).")
+        return
+
+    h, m = int(text[:2]), int(text[3:5])
+    now_utc = datetime.now(_tz_utc.utc)
+
+    # User clocks may drift a couple of minutes: tolerance ±5 min.
+    # Primary signal is the minute part (almost always exact, except for
+    # half-hour zones like Asia/Colombo which are not in our RU/EU list).
+    # Scoring: exact minute match + hour within tolerance first, then the
+    # closest overall delta, then canonical-zone priority.
+    user_min_total = h * 60 + m
+    scored = []
+    for tz in TIMEZONES:
+        try:
+            local = now_utc.astimezone(_zi.ZoneInfo(tz))
+            local_total = local.hour * 60 + local.minute
+            delta_min = abs(local_total - user_min_total) % 1440
+            delta_min = min(delta_min, 1440 - delta_min)  # wrap around midnight
+            if delta_min > 5:
+                continue
+            scored.append((delta_min, tz))
+        except Exception:
+            continue
+
+    await delete_user_message(message)
+
+    if not scored:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🌍 Выбрать из списка", callback_data="tz_list")
+        kb.row(home_back_button())
+        await render_message(
+            bot, message, state,
+            f"Не удалось однозначно определить зону по времени {text}. "
+            "Попробуйте ещё раз или выберите зону из списка.",
+            kb.as_markup(),
+            parse_mode=None,
+        )
+        return
+
+    # Prefer: smallest delta > Moscow/Kyiv/Minsk > other Russian zones >
+    # rest of Europe > alphabetical. Hours take priority: delta covers both.
+    def _tz_priority(entry: tuple) -> tuple:
+        delta_min, z = entry
+        if z == "Europe/Moscow":
+            group = 0
+        elif z in ("Europe/Kyiv", "Europe/Minsk", "Europe/Simferopol", "Europe/Kaliningrad"):
+            group = 1
+        elif z in __import__("app.bot.timezones", fromlist=["RUSSIA_ZONES"]).RUSSIA_ZONES:
+            group = 2
+        else:
+            group = 3
+        return (delta_min, group, z)
+
+    scored.sort(key=_tz_priority)
+    tz = scored[0][2]
+    chat_id = message.chat.id
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        config = await chat_repo.get_config(chat_id)
+        if config.schedule:
+            await chat_repo.update_schedule(chat_id, config.schedule, tz)
+        else:
+            await chat_repo.set_timezone(chat_id, tz)
+        config = await chat_repo.get_config(chat_id)
+
+    await state.clear()
+    extra = f" (совпадают: {len(scored)} зон)" if len(scored) > 1 else ""
+    await render_message(
+        bot, message, state,
+        f"✅ Часовой пояс определён: *{tz}*{extra}\\n\\n" + build_settings_text(config),
+        build_settings_keyboard(config).as_markup(),
+    )

@@ -27,16 +27,20 @@ class TagResolverService:
         self.jr_client = jr_client
         self.post_service = post_service
 
-    async def resolve_pending(self, limit: int = 5):
-        """Worker tick: resolve a few pending tag queries per cycle."""
+    async def resolve_pending(self, limit: int = 5, skip_locked: bool = False):
+        """Worker tick: resolve a few pending tag queries per cycle.
+
+        skip_locked=True (used by the background loop) claims rows with
+        FOR UPDATE SKIP LOCKED so a manual resolve never races with the loop.
+        """
         async with async_session() as session:
             repo = TagAliasRepository(session)
-            pending = await repo.pending(limit=limit)
+            pending = await repo.pending(limit=limit, locked=skip_locked)
+            queries = [(r.query, r.attempts or 0) for r in pending]
 
-        for row in pending:
-            if (row.attempts or 0) >= MAX_ATTEMPTS:
+        for query, attempts in queries:
+            if attempts >= MAX_ATTEMPTS:
                 continue
-            query = row.query
             try:
                 canonical = await self._canonical_for(query)
                 async with async_session() as session:
@@ -45,10 +49,7 @@ class TagResolverService:
                 await self._apply_to_chats(query, canonical)
             except Exception as e:
                 async with async_session() as session:
-                    r = await TagAliasRepository(session).get(query)
-                    if r:
-                        r.attempts = (r.attempts or 0) + 1
-                        await session.commit()
+                    await TagAliasRepository(session).bump_attempts(query)
                 logger.error("tag_alias_resolve_failed", query=query, error=str(e))
 
     async def _canonical_for(self, query: str) -> str | None:

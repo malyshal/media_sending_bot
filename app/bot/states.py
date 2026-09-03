@@ -6,6 +6,7 @@ class ChatSettingsStates(StatesGroup):
     setting_schedule = State()
     setting_schedule_max_posts = State()
     setting_schedule_interval = State()
+    setting_tz_auto = State()
     setting_next_max_posts = State()
     confirm_deletion = State()
 

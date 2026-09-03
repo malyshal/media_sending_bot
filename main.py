@@ -111,7 +111,7 @@ async def main():
                 async with _sess() as session:
                     ps = PostService(global_jr_client, global_queue, PostRepository(session))
                     resolver = TagResolverService(bot, global_queue, global_jr_client, ps)
-                    await resolver.resolve_pending(limit=5)
+                    await resolver.resolve_pending(limit=5, skip_locked=True)
             except Exception as e:
                 logger.error("tag_resolver_loop_error", error=str(e))
             await asyncio.sleep(60)

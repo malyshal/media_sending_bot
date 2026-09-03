@@ -37,14 +37,26 @@ class TagAliasRepository:
         await self.session.commit()
         return row
 
-    async def pending(self, limit: int = 20) -> List[TagAlias]:
-        """Unresolved queries (for the resolution worker)."""
+    async def pending(self, limit: int = 20, locked: bool = False) -> List[TagAlias]:
+        """Unresolved queries (for the resolution worker).
+
+        locked=True uses SELECT ... FOR UPDATE SKIP LOCKED so concurrent
+        workers (manual resolve + background loop) never pick the same rows.
+        """
         q = (select(TagAlias)
              .where(TagAlias.resolved == False)  # noqa: E712
              .order_by(TagAlias.attempts, TagAlias.created_at)
              .limit(limit))
+        if locked:
+            q = q.with_for_update(skip_locked=True)
         rows = await self.session.execute(q)
         return rows.scalars().all()
+
+    async def bump_attempts(self, query: str):
+        row = await self.get(query)
+        if row:
+            row.attempts = (row.attempts or 0) + 1
+            await self.session.commit()
 
     async def canonical_for(self, query: str) -> Optional[str]:
         row = await self.get(query)

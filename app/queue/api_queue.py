@@ -23,15 +23,20 @@ class APIQueue(BaseQueue):
         self._counter = 0
         self._retry_delays = [1, 5, 15]
         self._worker_task = asyncio.create_task(self._worker())
+        self._pending_futures: set = set()
 
     async def enqueue(self, task: Callable[..., Awaitable[Any]], *args, priority: int = 1, **kwargs):
         future = asyncio.get_running_loop().create_future()
         request = APIRequest(task, args, kwargs, future, priority)
         
         self._counter += 1
+        self._pending_futures.add(future)
         # Sequence prevents comparing Callables in PriorityQueue
         await self._queue.put((priority, self._counter, request))
-        return await future
+        try:
+            return await future
+        finally:
+            self._pending_futures.discard(future)
 
     async def _worker(self):
         while self._running:
@@ -75,9 +80,15 @@ class APIQueue(BaseQueue):
         pass
 
     async def stop(self):
+        """Stop the worker and fail all waiting callers instead of hanging forever."""
         self._running = False
         self._worker_task.cancel()
         try:
             await self._worker_task
         except asyncio.CancelledError:
             pass
+        # Wake up every caller still awaiting a queued task
+        for future in list(self._pending_futures):
+            if not future.done():
+                future.set_exception(RuntimeError("APIQueue is shutting down"))
+        self._pending_futures.clear()

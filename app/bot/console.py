@@ -13,6 +13,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 logger = structlog.get_logger()
 
 CONSOLE_KEY = "console_message_id"
+EPHEMERAL_KEY = "ephemeral_message_id"
 
 
 async def delete_user_message(message: Message) -> None:
@@ -34,6 +35,19 @@ async def reset_state_keep_console(state: FSMContext) -> None:
     await state.set_data({})
     if console_id is not None:
         await state.update_data(**{CONSOLE_KEY: console_id})
+
+
+async def reset_state_full(state: FSMContext) -> None:
+    """Full reset for message-driven commands: drop FSM state, keep the
+    console, and the caller will delete ephemeral via bot."""
+    data = await state.get_data()
+    console_id = data.get(CONSOLE_KEY)
+    ephemeral = data.get(EPHEMERAL_KEY)
+    await state.set_data({})
+    if console_id is not None:
+        await state.update_data(**{CONSOLE_KEY: console_id})
+    if ephemeral is not None:
+        await state.update_data(**{EPHEMERAL_KEY: ephemeral})
 
 
 async def _delete_by_id(bot: Bot, chat_id: int, message_id: int | None) -> None:
@@ -69,9 +83,13 @@ async def render_callback(callback: CallbackQuery, state: FSMContext, text: str,
                           keyboard: InlineKeyboardMarkup, parse_mode: str | None = "Markdown",
                           refresh: bool = False) -> Message:
     """Button path: edit the console in place (TS: single-message UI).
-    refresh=True re-sends it at the bottom instead (used rarely)."""
+    refresh=True re-sends it at the bottom instead (used rarely).
+    Tracked ephemeral messages (errors/notices) are removed."""
     await callback.answer()
     chat_id = callback.message.chat.id
+    await delete_ephemeral(callback.bot, chat_id, state)
+    data = await state.get_data()
+    console_id = data.get(CONSOLE_KEY)
     data = await state.get_data()
     console_id = data.get(CONSOLE_KEY)
 
@@ -94,10 +112,11 @@ async def render_callback(callback: CallbackQuery, state: FSMContext, text: str,
 async def render_message(bot: Bot, message: Message, state: FSMContext, text: str,
                          keyboard: InlineKeyboardMarkup | None, parse_mode: str | None = "Markdown") -> Message:
     """Message-triggered render (command or text input):
-    consume the user's message, then edit the existing console — never spawn a new one
-    unless the old console is unrecoverable."""
+    consume the user's message, delete ephemeral notices, then edit the
+    existing console — never spawn a new one unless the old console is lost."""
     await delete_user_message(message)
     chat_id = message.chat.id
+    await delete_ephemeral(bot, chat_id, state)
     data = await state.get_data()
     console_id = data.get(CONSOLE_KEY)
 
@@ -118,3 +137,27 @@ async def prompt_input(callback: CallbackQuery, state: FSMContext, prompt: str,
     handler renders the result into the same console via render_message.
     """
     return await render_callback(callback, state, prompt, None, parse_mode=parse_mode)
+
+async def send_ephemeral(bot: Bot, chat_id: int, state: FSMContext, text: str,
+                         keyboard: InlineKeyboardMarkup | None = None,
+                         parse_mode: str | None = None) -> Message:
+    """Send a feedback message (errors, notices) tracked for auto-deletion.
+
+    It is removed on the user's next action (any command or button), keeping
+    the chat clean. Delivered posts are NOT tracked this way."""
+    data = await state.get_data()
+    old = data.get(EPHEMERAL_KEY)
+    await _delete_by_id(bot, chat_id, old)
+    sent = await bot.send_message(chat_id=chat_id, text=text,
+                                  parse_mode=parse_mode, reply_markup=keyboard)
+    await state.update_data(**{EPHEMERAL_KEY: sent.message_id})
+    return sent
+
+
+async def delete_ephemeral(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    """Remove the tracked ephemeral message (called from render paths)."""
+    data = await state.get_data()
+    old = data.get(EPHEMERAL_KEY)
+    if old:
+        await _delete_by_id(bot, chat_id, old)
+        await state.update_data(**{EPHEMERAL_KEY: None})

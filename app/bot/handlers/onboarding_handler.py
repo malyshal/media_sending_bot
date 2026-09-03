@@ -3,7 +3,8 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from app.bot.states import OnboardingStates, ChatSettingsStates
 from app.bot.menu import build_home_text, build_home_keyboard
-from app.bot.console import render_callback, render_message, prompt_input, delete_user_message, reset_state_keep_console
+from app.bot.console import (render_callback, render_message, prompt_input, delete_user_message,
+                            reset_state_keep_console, send_ephemeral)
 from app.db.session import async_session
 from app.db.repositories.user_repository import UserRepository
 from app.db.repositories.chat_repository import ChatRepository
@@ -94,7 +95,7 @@ async def cb_home(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "home_next")
-async def cb_home_next(callback: CallbackQuery, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def cb_home_next(callback: CallbackQuery, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     await callback.answer("Ищу посты...")
     chat_id = callback.message.chat.id
     async with async_session() as session:
@@ -113,8 +114,9 @@ async def cb_home_next(callback: CallbackQuery, bot: Bot, api_queue: 'APIQueue',
             show_links=config.show_post_links,
         )
     if sent_count == 0:
-        await callback.message.answer(
-            "Не нашлось новых постов по вашим фильтрам 😢 Попробуйте позже или измените теги."
+        await send_ephemeral(
+            bot, chat_id, state,
+            "Не нашлось новых постов по вашим фильтрам 😢 Попробуйте позже или измените теги.",
         )
 
 
@@ -166,8 +168,10 @@ async def process_tag_search(message: Message, state: FSMContext, bot: Bot, api_
     try:
         tags = await api_queue.enqueue(jr_client.search_tags, query)
         if not tags:
-            await delete_user_message(message)
-            await message.answer("Ничего не найдено. Попробуйте другой запрос.")
+            await send_ephemeral(
+                bot, message.chat.id, state,
+                "Ничего не найдено. Попробуйте другой запрос.",
+            )
             return
 
         kb_list = []
@@ -183,8 +187,10 @@ async def process_tag_search(message: Message, state: FSMContext, bot: Bot, api_
         await state.set_state(OnboardingStates.selecting_tag)
     except Exception as e:
         logger.error("tag_search_error", error=str(e))
-        await delete_user_message(message)
-        await message.answer("Произошла ошибка при поиске тегов. Попробуйте позже.")
+        await send_ephemeral(
+            bot, message.chat.id, state,
+            "Произошла ошибка при поиске тегов. Попробуйте позже.",
+        )
 
 
 @router.callback_query(F.data.startswith("tag_select:"))
@@ -205,7 +211,7 @@ async def select_tag(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "get_first_post")
-async def get_first_post_handler(callback: CallbackQuery, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def get_first_post_handler(callback: CallbackQuery, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     await callback.answer("Ищу подходящий пост...")
 
     async with async_session() as session:
@@ -228,7 +234,10 @@ async def get_first_post_handler(callback: CallbackQuery, bot: Bot, api_queue: '
         )
 
         if sent_count == 0:
-            await callback.message.answer("К сожалению, не удалось найти подходящий пост прямо сейчас. Попробуйте позже!")
+            await send_ephemeral(
+                bot, callback.message.chat.id, state,
+                "К сожалению, не удалось найти подходящий пост прямо сейчас. Попробуйте позже!",
+            )
 
 
 @router.callback_query(F.data == "change_tags")

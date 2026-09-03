@@ -1,19 +1,20 @@
 from aiogram import Router, types, Bot
+from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 import structlog
 from app.services.delivery_service import DeliveryService
 from app.db.session import async_session
-from app.bot.console import delete_user_message
+from app.bot.console import delete_user_message, send_ephemeral
 
 logger = structlog.get_logger()
 router = Router()
 
 @router.message(Command("next"))
-async def cmd_next(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def cmd_next(message: types.Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     await delete_user_message(message)
-    return await handle_next_request(message, bot, api_queue, jr_client)
+    return await handle_next_request(message, state, bot, api_queue, jr_client)
 
-async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
+async def handle_next_request(message: types.Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     chat_id = message.chat.id
     logger.info("cmd_next_received", chat_id=chat_id)
     
@@ -45,4 +46,7 @@ async def handle_next_request(message: types.Message, bot: Bot, api_queue: 'APIQ
         )
         
         if sent_count == 0:
-            await message.answer("Не нашлось новых постов по вашим фильтрам 😢 Попробуйте позже или измените теги.")
+            await send_ephemeral(
+                bot, chat_id, state,
+                "Не нашлось новых постов по вашим фильтрам 😢 Попробуйте позже или измените теги.",
+            )
