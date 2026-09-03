@@ -222,7 +222,7 @@ async def _tag_autocomplete(message: types.Message, query: str, state: FSMContex
         )
 
 
-@router.message(ChatSettingsStates.waiting_for_tag_search)
+@router.message(~F.text.startswith("/"), ChatSettingsStates.waiting_for_tag_search)
 async def proc_tag_search_from_menu(message: types.Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     query = (message.text or "").strip()
     if not query:
@@ -545,7 +545,7 @@ async def cb_set_schedule_interval(callback: types.CallbackQuery, state: FSMCont
     await state.set_state(ChatSettingsStates.setting_schedule_interval)
 
 
-@router.message(ChatSettingsStates.setting_schedule_interval)
+@router.message(~F.text.startswith("/"), ChatSettingsStates.setting_schedule_interval)
 async def proc_set_schedule_interval(message: types.Message, state: FSMContext, bot: Bot):
     text = (message.text or "").strip()
     if not text.isdigit() or not (1 <= int(text) <= 365):
@@ -585,7 +585,7 @@ async def cb_set_schedule_time(callback: types.CallbackQuery, state: FSMContext)
     await state.set_state(ChatSettingsStates.setting_schedule)
 
 
-@router.message(ChatSettingsStates.setting_schedule)
+@router.message(~F.text.startswith("/"), ChatSettingsStates.setting_schedule)
 async def proc_set_schedule(message: types.Message, state: FSMContext, bot: Bot):
     import re
     time_pattern = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
@@ -758,7 +758,7 @@ async def cb_set_schedule_max_posts(callback: types.CallbackQuery, state: FSMCon
     await state.set_state(ChatSettingsStates.setting_schedule_max_posts)
 
 
-@router.message(ChatSettingsStates.setting_schedule_max_posts)
+@router.message(~F.text.startswith("/"), ChatSettingsStates.setting_schedule_max_posts)
 async def proc_set_schedule_max_posts(message: types.Message, state: FSMContext, bot: Bot):
     value = _parse_limit(message.text, max_value=100)
     if value is None:
@@ -795,7 +795,7 @@ async def cb_set_next_max_posts(callback: types.CallbackQuery, state: FSMContext
     await state.set_state(ChatSettingsStates.setting_next_max_posts)
 
 
-@router.message(ChatSettingsStates.setting_next_max_posts)
+@router.message(~F.text.startswith("/"), ChatSettingsStates.setting_next_max_posts)
 async def proc_set_next_max_posts(message: types.Message, state: FSMContext, bot: Bot):
     value = _parse_limit(message.text, max_value=20)
     if value is None:
@@ -968,7 +968,7 @@ async def cb_noop(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.message(ChatSettingsStates.setting_tz_auto)
+@router.message(~F.text.startswith("/"), ChatSettingsStates.setting_tz_auto)
 async def proc_tz_auto(message: types.Message, state: FSMContext, bot: Bot):
     """Auto-detect the user's timezone from their current local time."""
     import re as _re

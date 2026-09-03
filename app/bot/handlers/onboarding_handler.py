@@ -161,7 +161,7 @@ async def find_tag_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(OnboardingStates.waiting_for_first_tag)
 
 
-@router.message(OnboardingStates.waiting_for_first_tag)
+@router.message(~F.text.startswith("/"), OnboardingStates.waiting_for_first_tag)
 async def process_tag_search(message: Message, state: FSMContext, bot: Bot, api_queue: 'APIQueue', jr_client: 'JoyReactorClient'):
     query = (message.text or "").strip()
     # TS #56: local cache search first, API fallback
