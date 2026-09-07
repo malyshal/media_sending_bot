@@ -15,7 +15,7 @@ from app.queue.api_queue import APIQueue
 from app.joyreactor.client import JoyReactorClient
 from app.bot.states import ChatSettingsStates
 from app.services.scheduler_service import VALID_MODES
-from app.bot.menu import home_back_button
+from app.bot.menu import home_back_button, md_escape
 from app.bot.console import (render_callback, render_message, prompt_input, delete_user_message,
                             reset_state_keep_console, send_ephemeral)
 
@@ -68,8 +68,8 @@ def build_settings_text(config) -> str:
         f"📦 Лимит (Регламент): {config.schedule_max_posts} постов\n"
         f"📩 Лимит (/next): {config.next_max_posts} постов\n"
         f"{links_line}\n"
-        f"📥 Include: {', '.join(config.include_tags) if config.include_tags else 'все'}\n"
-        f"🚫 Exclude: {', '.join(config.exclude_tags) if config.exclude_tags else 'нет'}"
+        f"📥 Include: {', '.join(md_escape(t) for t in config.include_tags) if config.include_tags else 'все'}\n"
+        f"🚫 Exclude: {', '.join(md_escape(t) for t in config.exclude_tags) if config.exclude_tags else 'нет'}"
     )
 
 
@@ -118,7 +118,7 @@ def build_tag_list_text(config, kind: str) -> str:
         title, tags = "Include", config.include_tags or []
     else:
         title, tags = "Exclude", config.exclude_tags or []
-    lines = "\n".join(f"  • {t}" for t in tags) or "  (пусто)"
+    lines = "\n".join(f"  • {md_escape(t)}" for t in tags) or "  (пусто)"
     return (
         f"{'📥' if kind == 'inc' else '🚫'} *Теги {title}*\n\n"
         f"{lines}\n\n"
@@ -303,7 +303,7 @@ async def cb_tag_selected(callback: types.CallbackQuery, state: FSMContext):
 
     await render_callback(
         callback, state,
-        f"Что сделать с тегом *{tag_name}*?",
+        f"Что сделать с тегом *{md_escape(tag_name)}*?",
         kb.as_markup(),
     )
 
