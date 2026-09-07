@@ -94,24 +94,46 @@ def build_settings_keyboard(config=None) -> InlineKeyboardBuilder:
 # ---------------------------------------------------------------- tag menu
 
 def build_tag_menu_text(config) -> str:
-    inc = "\n".join(f"  • {t}" for t in config.include_tags) or "  (пусто)"
-    exc = "\n".join(f"  • {t}" for t in config.exclude_tags) or "  (пусто)"
+    inc_n = len(config.include_tags or [])
+    exc_n = len(config.exclude_tags or [])
     return (
         f"🏷 *Управление тегами*\n\n"
-        f"📥 Include:\n{inc}\n\n"
-        f"🚫 Exclude:\n{exc}"
+        f"📥 Include: {inc_n}\n"
+        f"🚫 Exclude: {exc_n}"
     )
 
 
 def build_tag_menu_keyboard(config) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
-    for t in (config.include_tags or [])[:10]:
-        kb.button(text=f"➖ {t}", callback_data=f"tag_remove:{t}")
-    for t in (config.exclude_tags or [])[:10]:
-        kb.button(text=f"➖ {t} (исключ.)", callback_data=f"tag_unexclude:{t}")
-    kb.button(text="🔍 Добавить тег (поиск)", callback_data="tag_start_search")
-    kb.adjust(2, 2, 2, 2, 2, 1)
-    kb.row(home_back_button())
+    kb.button(text="📥 Include", callback_data="tag_menu_inc")
+    kb.button(text="🚫 Exclude", callback_data="tag_menu_exc")
+    kb.button(text="🔍 Добавить тег", callback_data="tag_start_search")
+    kb.button(text="⬅️ Назад", callback_data="home_settings")
+    kb.adjust(1)
+    return kb
+
+
+def build_tag_list_text(config, kind: str) -> str:
+    if kind == "inc":
+        title, tags = "Include", config.include_tags or []
+    else:
+        title, tags = "Exclude", config.exclude_tags or []
+    lines = "\n".join(f"  • {t}" for t in tags) or "  (пусто)"
+    return (
+        f"{'📥' if kind == 'inc' else '🚫'} *Теги {title}*\n\n"
+        f"{lines}\n\n"
+        f"Нажмите на тег, чтобы удалить его."
+    )
+
+
+def build_tag_list_keyboard(config, kind: str) -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    tags = config.include_tags if kind == "inc" else config.exclude_tags
+    for t in (tags or [])[:10]:
+        cb = f"tag_remove:{t}" if kind == "inc" else f"tag_unexclude:{t}"
+        kb.button(text=f"➖ {t}", callback_data=cb)
+    kb.adjust(1)
+    kb.button(text="⬅️ Назад", callback_data="open_tag_menu")
     return kb
 
 
@@ -132,6 +154,32 @@ async def cb_open_tag_menu(callback: types.CallbackQuery, state: FSMContext):
     await open_tag_menu(callback, state)
 
 
+@router.callback_query(F.data == "tag_menu_inc")
+async def cb_tag_menu_inc(callback: types.CallbackQuery, state: FSMContext):
+    await reset_state_keep_console(state)
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
+    await render_callback(
+        callback, state,
+        build_tag_list_text(config, "inc"),
+        build_tag_list_keyboard(config, "inc").as_markup(),
+    )
+
+
+@router.callback_query(F.data == "tag_menu_exc")
+async def cb_tag_menu_exc(callback: types.CallbackQuery, state: FSMContext):
+    await reset_state_keep_console(state)
+    chat_id = callback.message.chat.id
+    async with async_session() as session:
+        config = await ChatRepository(session).get_config(chat_id)
+    await render_callback(
+        callback, state,
+        build_tag_list_text(config, "exc"),
+        build_tag_list_keyboard(config, "exc").as_markup(),
+    )
+
+
 @router.callback_query(F.data.startswith("tag_remove:"))
 async def cb_tag_remove(callback: types.CallbackQuery, state: FSMContext):
     tag = callback.data.split(":", 1)[1]
@@ -145,8 +193,8 @@ async def cb_tag_remove(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer(f"«{tag}» удалён из include")
     await render_callback(
         callback, state,
-        build_tag_menu_text(config),
-        build_tag_menu_keyboard(config).as_markup(),
+        build_tag_list_text(config, "inc"),
+        build_tag_list_keyboard(config, "inc").as_markup(),
     )
 
 
@@ -163,8 +211,8 @@ async def cb_tag_unexclude(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer(f"«{tag}» удалён из exclude")
     await render_callback(
         callback, state,
-        build_tag_menu_text(config),
-        build_tag_menu_keyboard(config).as_markup(),
+        build_tag_list_text(config, "exc"),
+        build_tag_list_keyboard(config, "exc").as_markup(),
     )
 
 
@@ -186,7 +234,7 @@ async def _tag_autocomplete(message: types.Message, query: str, state: FSMContex
         for tag in local:
             kb.button(text=tag, callback_data=f"tag_select:{tag}")
         kb.adjust(1)
-        kb.row(home_back_button())
+        kb.button(text="⬅️ Назад", callback_data="open_tag_menu")
         await render_message(
             bot, message, state,
             f"Найдено в кэше по запросу «{query}»:",
@@ -211,7 +259,7 @@ async def _tag_autocomplete(message: types.Message, query: str, state: FSMContex
         for tag in tags[:8]:
             kb.button(text=tag.name, callback_data=f"tag_select:{tag.name}")
         kb.adjust(1)
-        kb.row(home_back_button())
+        kb.button(text="⬅️ Назад", callback_data="open_tag_menu")
 
         await render_message(
             bot, message, state,
