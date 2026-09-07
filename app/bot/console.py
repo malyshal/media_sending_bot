@@ -33,6 +33,7 @@ async def reset_state_keep_console(state: FSMContext) -> None:
     data = await state.get_data()
     console_id = data.get(CONSOLE_KEY)
     await state.set_data({})
+    await state.set_state(None)
     if console_id is not None:
         await state.update_data(**{CONSOLE_KEY: console_id})
 
@@ -44,6 +45,7 @@ async def reset_state_full(state: FSMContext) -> None:
     console_id = data.get(CONSOLE_KEY)
     ephemeral = data.get(EPHEMERAL_KEY)
     await state.set_data({})
+    await state.set_state(None)
     if console_id is not None:
         await state.update_data(**{CONSOLE_KEY: console_id})
     if ephemeral is not None:
@@ -74,7 +76,12 @@ async def _edit(bot: Bot, chat_id: int, message_id: int | None, text: str,
 
 async def _send(bot: Bot, chat_id: int, state: FSMContext, text: str,
                 keyboard: InlineKeyboardMarkup | None, parse_mode: str | None) -> Message:
-    sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=keyboard)
+    try:
+        sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=keyboard)
+    except Exception as e:
+        # e.g. bot kicked from the group — log instead of crashing the update
+        logger.warning("console_send_failed", chat_id=chat_id, error=str(e))
+        return None
     await state.update_data(**{CONSOLE_KEY: sent.message_id})
     return sent
 
