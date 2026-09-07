@@ -7,8 +7,9 @@ def build_home_text(config: ChatConfig) -> str:
     inc = ", ".join(config.include_tags) if config.include_tags else "все"
     exc = ", ".join(config.exclude_tags) if config.exclude_tags else "нет"
 
-    if config.auto_send and config.schedule:
-        schedule_line = f"🕒 Автоотправка: ежедневно в {config.schedule} ({config.timezone})"
+    schedule = config.schedule or ""
+    if config.auto_send and schedule:
+        schedule_line = f"🕒 Автоотправка: ежедневно в {schedule.replace('*', '')} ({config.timezone})"
     elif config.auto_send:
         schedule_line = "🕒 Автоотправка: вкл (время не задано!)"
     else:

@@ -25,6 +25,11 @@ router = Router()
 from app.bot.timezones import TIMEZONES, PAGE_SIZE
 
 
+def _safe_schedule(schedule: str) -> str:
+    # hourly modes store "*:MM" — a raw "*" breaks Telegram Markdown entities
+    return schedule.replace("*", "") if schedule else schedule
+
+
 def _tz_button_label(tz: str, current: str) -> str:
     marker = "✅ " if tz == current else ""
     return f"{marker}{tz}"
@@ -50,9 +55,9 @@ async def open_settings(callback: types.CallbackQuery, state: FSMContext):
 
 def build_settings_text(config) -> str:
     if config.auto_send and config.schedule:
-        schedule_line = f"🕒 Расписание: ежедневно в {config.schedule} ({config.timezone}) — вкл"
+        schedule_line = f"🕒 Расписание: ежедневно в {_safe_schedule(config.schedule)} ({config.timezone}) — вкл"
     elif config.schedule:
-        schedule_line = f"🕒 Расписание: {config.schedule} ({config.timezone}) — выкл"
+        schedule_line = f"🕒 Расписание: {_safe_schedule(config.schedule)} ({config.timezone}) — выкл"
     else:
         schedule_line = f"🕒 Расписание: не задано ({config.timezone}) — выкл"
 
@@ -1049,6 +1054,6 @@ async def proc_tz_auto(message: types.Message, state: FSMContext, bot: Bot):
     extra = f" (совпадают: {len(scored)} зон)" if len(scored) > 1 else ""
     await render_message(
         bot, message, state,
-        f"✅ Часовой пояс определён: *{tz}*{extra}\\n\\n" + build_settings_text(config),
+        f"✅ Часовой пояс определён: *{tz}*{extra}\n\n" + build_settings_text(config),
         build_settings_keyboard(config).as_markup(),
     )
