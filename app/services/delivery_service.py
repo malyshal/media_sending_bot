@@ -94,9 +94,9 @@ class DeliveryService:
                 break
         return sent_count
 
-    async def send_next_post(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], ignore_history: bool = False, _depth: int = 0, show_links: bool = False) -> Optional[types.Message]:
-        # 1. Get candidate post
-        post = await self.post_service.get_next_post_for_chat(chat_id, include_tags, exclude_tags, ignore_history=ignore_history)
+    async def send_next_post(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], ignore_history: bool = False, _depth: int = 0, show_links: bool = False, post: Optional[Post] = None) -> Optional[types.Message]:
+        # 1. Get candidate post (or use the explicitly requested one)
+        post = post if post is not None else await self.post_service.get_next_post_for_chat(chat_id, include_tags, exclude_tags, ignore_history=ignore_history)
         if not post:
             logger.info("no_suitable_post_found", chat_id=chat_id)
             return None

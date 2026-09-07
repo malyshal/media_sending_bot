@@ -8,6 +8,7 @@ class ChatSettingsStates(StatesGroup):
     setting_schedule_interval = State()
     setting_tz_auto = State()
     setting_next_max_posts = State()
+    waiting_for_post_link = State()
     confirm_deletion = State()
 
 class OnboardingStates(StatesGroup):
