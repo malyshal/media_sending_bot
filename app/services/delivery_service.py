@@ -50,21 +50,26 @@ def _clean_html(text: str) -> str:
     return plain
 
 
-def _make_caption(text: Optional[str], link: str = "") -> str:
+def _make_caption(text: Optional[str], link: str = "", limit: int = TELEGRAM_CAPTION_LIMIT) -> str:
     """TS #34: post text as caption (+optional source link), truncated to the Telegram limit.
     The source link is always kept visible: text is truncated first.
     Media placeholders (&attribute_insert_N&) are removed — they mark where
     media is inserted on the site and are not human-readable text.
-    HTML markup (<p>...</p> etc.) is stripped to plain text."""
+    HTML markup (<p>...</p> etc.) is stripped to plain text.
+    `limit` lets callers reuse this for bot.send_message (4096) when the post
+    has no media to attach the caption to."""
     text = _ATTR_PLACEHOLDER.sub(" ", text or "")
     text = BeautifulSoup(text, "html.parser").get_text(separator="\n", strip=True)
     if not text:
         return f"🔗 {link}" if link else ""
     link_block = f"\n\n🔗 {link}" if link else ""
-    budget = TELEGRAM_CAPTION_LIMIT - len(link_block)
+    budget = limit - len(link_block)
     if len(text) > budget:
         text = text[: budget - 1] + "…"
     return text + link_block
+
+
+TELEGRAM_MESSAGE_LIMIT = 4096
 
 
 class DeliveryService:
@@ -229,12 +234,21 @@ class DeliveryService:
 
     def _post_media_items(self, post: Post) -> list[tuple[str, str]]:
         """Media list for delivery: all media if available, else the single primary item.
-        Capped at 10 items (Telegram media group limit)."""
-        items = []
+        Capped at 10 items (Telegram media group limit).
+
+        Resolution order:
+          1. raw_data.attributes via _all_media_urls (old GraphQL numeric CDN)
+          2. raw_data._resolved_media_urls (slugged CDN scraped by
+             resolve_media_via_post_page for newer posts)
+          3. media_url alone (single-image posts)"""
+        items: list[tuple[str, str]] = []
         raw = post.raw_data if isinstance(post.raw_data, dict) else None
         if raw:
             items = self.post_service.client._all_media_urls(post.id, raw.get("attributes", []))
-        if not items:
+            if not items:
+                resolved = raw.get("_resolved_media_urls") or []
+                items = [(u, t or "image") for u, t in resolved]
+        if not items and post.media_url:
             items = [(post.media_url, post.media_type or "image")]
         return items[:10]
 

@@ -349,8 +349,13 @@ class JoyReactorClient:
             urls = sorted(set(_re.findall(r'https://img[0-9]+\.joyreactor\.cc/pics/post/[^"\s]+', html)))
             if not urls:
                 return None
+            # The page emits the same media in two flavours: a "full" variant
+            # (https://.../pics/post/full/<slug>) and a non-full variant that
+            # also resolves to the full image. Skip the /full/ alias to avoid
+            # sending the same image twice in a Telegram media group.
+            base_urls = [u for u in urls if "/pics/post/full/" not in u]
             items = []
-            for u in urls:
+            for u in base_urls:
                 if "/webm/" in u:
                     items.append((u, "gif"))
                 elif "/static/" in u:
