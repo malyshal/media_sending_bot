@@ -39,9 +39,16 @@ class JoyReactorClient:
         payload = {"query": query, "variables": variables or {}}
         body = json.dumps(payload).encode("utf-8")
 
+        # JoyReactor's GraphQL endpoint returns `node: null` when Origin/Referer
+        # are missing — the API requires them to look up the post. Merge our
+        # default headers into the per-request headers.
+        merged_headers = {**self.headers,
+                          "Content-Type": "application/json",
+                          "Accept": "application/json"}
+
         status, resp_headers, content = await asyncio.to_thread(
             https_request_sync, self.api_url, "POST", body,
-            {"Content-Type": "application/json", "Accept": "application/json"},
+            merged_headers,
             15.0, False,
         )
 
