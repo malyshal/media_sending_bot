@@ -113,27 +113,55 @@ def build_tag_menu_keyboard(config) -> InlineKeyboardBuilder:
     return kb
 
 
-def build_tag_list_text(config, kind: str) -> str:
+def build_tag_list_text(config, kind: str, page: int = 0) -> str:
     if kind == "inc":
         title, tags = "Include", config.include_tags or []
     else:
         title, tags = "Exclude", config.exclude_tags or []
-    lines = "\n".join(f"  • {md_escape(t)}" for t in tags) or "  (пусто)"
+    page_size = 10
+    total_pages = max(1, (len(tags) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    visible = tags[page * page_size:(page + 1) * page_size]
+    if visible:
+        lines = "\n".join(f"  • {md_escape(t)}" for t in visible)
+        page_line = f"\n_Страница {page + 1} / {total_pages}_" if total_pages > 1 else ""
+    else:
+        lines = "  (пусто)"
+        page_line = ""
     return (
-        f"{'📥' if kind == 'inc' else '🚫'} *Теги {title}*\n\n"
+        f"{'📥' if kind == 'inc' else '🚫'} *Теги {title}*"
+        f"{page_line}\n\n"
         f"{lines}\n\n"
         f"Нажмите на тег, чтобы удалить его."
     )
 
 
-def build_tag_list_keyboard(config, kind: str) -> InlineKeyboardBuilder:
+def build_tag_list_keyboard(kind: str, page: int, total: int, tags: list[str]) -> InlineKeyboardBuilder:
+    """Index-based tag list (full tag names live in FSM under `tag_list:<kind>`).
+    Cyrillic tags easily exceed Telegram's 64-byte callback_data limit, so we
+    pass the global index and resolve the tag by its position in the FSM list.
+    """
+    page_size = 10
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
     kb = InlineKeyboardBuilder()
-    tags = config.include_tags if kind == "inc" else config.exclude_tags
-    for t in (tags or [])[:10]:
-        cb = f"tag_remove:{t}" if kind == "inc" else f"tag_unexclude:{t}"
-        kb.button(text=f"➖ {t}", callback_data=cb)
-    kb.adjust(1)
+    if total > 0:
+        kb.button(
+            text="◀️",
+            callback_data=f"tag_list_{kind}:{page - 1}" if page > 0 else "noop",
+        )
+        kb.button(text=f"· {page + 1} / {total_pages} ·", callback_data="noop")
+        kb.button(
+            text="▶️",
+            callback_data=f"tag_list_{kind}:{page + 1}" if page < total_pages - 1 else "noop",
+        )
+        kb.adjust(3)
+        start = page * page_size
+        for i in range(start, min(start + page_size, total)):
+            kb.button(text=f"➖ {tags[i]}", callback_data=f"tag_rm_{kind}:{i}")
+        kb.adjust(3, *[1] * page_size)
     kb.button(text="⬅️ Назад", callback_data="open_tag_menu")
+    kb.adjust(1)
     return kb
 
 
@@ -154,66 +182,109 @@ async def cb_open_tag_menu(callback: types.CallbackQuery, state: FSMContext):
     await open_tag_menu(callback, state)
 
 
-@router.callback_query(F.data == "tag_menu_inc")
-async def cb_tag_menu_inc(callback: types.CallbackQuery, state: FSMContext):
-    await reset_state_keep_console(state)
+async def _open_tag_list(callback: types.CallbackQuery, state: FSMContext, kind: str, page: int = 0):
+    """Render the Include/Exclude tag list at the given page and stash the
+    full tag list in FSM so callbacks can resolve tag indices."""
     chat_id = callback.message.chat.id
     async with async_session() as session:
         config = await ChatRepository(session).get_config(chat_id)
+    tags = list(config.include_tags or []) if kind == "inc" else list(config.exclude_tags or [])
+    await state.update_data(**{f"tag_list:{kind}": tags})
+    page = max(0, page)
     await render_callback(
         callback, state,
-        build_tag_list_text(config, "inc"),
-        build_tag_list_keyboard(config, "inc").as_markup(),
+        build_tag_list_text(config, kind, page=page),
+        build_tag_list_keyboard(kind, page, len(tags), tags).as_markup(),
     )
+
+
+@router.callback_query(F.data == "tag_menu_inc")
+async def cb_tag_menu_inc(callback: types.CallbackQuery, state: FSMContext):
+    await reset_state_keep_console(state)
+    await _open_tag_list(callback, state, "inc", page=0)
 
 
 @router.callback_query(F.data == "tag_menu_exc")
 async def cb_tag_menu_exc(callback: types.CallbackQuery, state: FSMContext):
     await reset_state_keep_console(state)
-    chat_id = callback.message.chat.id
-    async with async_session() as session:
-        config = await ChatRepository(session).get_config(chat_id)
-    await render_callback(
-        callback, state,
-        build_tag_list_text(config, "exc"),
-        build_tag_list_keyboard(config, "exc").as_markup(),
-    )
+    await _open_tag_list(callback, state, "exc", page=0)
 
 
-@router.callback_query(F.data.startswith("tag_remove:"))
-async def cb_tag_remove(callback: types.CallbackQuery, state: FSMContext):
-    tag = callback.data.split(":", 1)[1]
+@router.callback_query(F.data.startswith("tag_list_inc:"))
+async def cb_tag_list_inc(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        page = 0
+    await _open_tag_list(callback, state, "inc", page=page)
+
+
+@router.callback_query(F.data.startswith("tag_list_exc:"))
+async def cb_tag_list_exc(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        page = 0
+    await _open_tag_list(callback, state, "exc", page=page)
+
+
+async def _remove_tag_at(callback: types.CallbackQuery, state: FSMContext, kind: str, idx: int):
+    """Remove the tag at FSM index `idx` and re-render the same page."""
     chat_id = callback.message.chat.id
+    data = await state.get_data()
+    cached = data.get(f"tag_list:{kind}") or []
+    if not (0 <= idx < len(cached)):
+        await callback.answer("Тег не найден", show_alert=True)
+        return
+    tag = cached[idx]
+
     async with async_session() as session:
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
-        new_inc = [t for t in config.include_tags if t != tag]
-        await chat_repo.update_tags(chat_id, new_inc, config.exclude_tags)
-        config = await chat_repo.get_config(chat_id)
-    await callback.answer(f"«{tag}» удалён из include")
+        if kind == "inc":
+            new_inc = [t for t in config.include_tags if t != tag]
+            new_exc = [t for t in config.exclude_tags if t != tag]
+            await chat_repo.update_tags(chat_id, new_inc, new_exc)
+            config = await chat_repo.get_config(chat_id)
+        else:
+            new_exc = [t for t in config.exclude_tags if t != tag]
+            new_inc = [t for t in config.include_tags if t != tag]
+            await chat_repo.update_tags(chat_id, new_inc, new_exc)
+            config = await chat_repo.get_config(chat_id)
+
+    tags = list(config.include_tags or []) if kind == "inc" else list(config.exclude_tags or [])
+    page_size = 10
+    total = len(tags)
+    page = idx // page_size if total else 0
+    if total:
+        page = min(page, max(0, (total - 1) // page_size))
+    await state.update_data(**{f"tag_list:{kind}": tags})
+    await callback.answer(f"«{tag}» удалён")
     await render_callback(
         callback, state,
-        build_tag_list_text(config, "inc"),
-        build_tag_list_keyboard(config, "inc").as_markup(),
+        build_tag_list_text(config, kind, page=page),
+        build_tag_list_keyboard(kind, page, total, tags).as_markup(),
     )
 
 
-@router.callback_query(F.data.startswith("tag_unexclude:"))
-async def cb_tag_unexclude(callback: types.CallbackQuery, state: FSMContext):
-    tag = callback.data.split(":", 1)[1]
-    chat_id = callback.message.chat.id
-    async with async_session() as session:
-        chat_repo = ChatRepository(session)
-        config = await chat_repo.get_config(chat_id)
-        new_exc = [t for t in config.exclude_tags if t != tag]
-        await chat_repo.update_tags(chat_id, config.include_tags, new_exc)
-        config = await chat_repo.get_config(chat_id)
-    await callback.answer(f"«{tag}» удалён из exclude")
-    await render_callback(
-        callback, state,
-        build_tag_list_text(config, "exc"),
-        build_tag_list_keyboard(config, "exc").as_markup(),
-    )
+@router.callback_query(F.data.startswith("tag_rm_inc:"))
+async def cb_tag_rm_inc(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        idx = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    await _remove_tag_at(callback, state, "inc", idx)
+
+
+@router.callback_query(F.data.startswith("tag_rm_exc:"))
+async def cb_tag_rm_exc(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        idx = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    await _remove_tag_at(callback, state, "exc", idx)
 
 
 @router.callback_query(F.data == "tag_start_search")
