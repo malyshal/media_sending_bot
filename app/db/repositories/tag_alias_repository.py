@@ -63,3 +63,37 @@ class TagAliasRepository:
         if row and row.resolved and row.canonical:
             return row.canonical
         return None
+
+    async def is_broken(self, query: str) -> bool:
+        """True once the resolver has confirmed the query has no real tag.
+        Resolved=True and canonical=None means we've already tried and failed
+        — don't keep retrying it on every /next."""
+        row = await self.get(query)
+        return bool(row and row.resolved and not row.canonical)
+
+    async def is_known_broken(self, queries: List[str]) -> set[str]:
+        """Bulk variant: return subset of `queries` that are confirmed broken."""
+        if not queries:
+            return set()
+        rows = await self.session.execute(
+            select(TagAlias).where(
+                TagAlias.query.in_(queries),
+                TagAlias.resolved == True,  # noqa: E712
+                TagAlias.canonical.is_(None),
+            )
+        )
+        return {r.query for r in rows.scalars().all()}
+
+    async def resolve_queries(self, queries: List[str]) -> dict[str, Optional[str]]:
+        """Bulk canonical lookup. Returns {query: canonical_or_None_if_broken}."""
+        if not queries:
+            return {}
+        rows = await self.session.execute(
+            select(TagAlias).where(TagAlias.query.in_(queries))
+        )
+        out: dict[str, Optional[str]] = {}
+        for r in rows.scalars().all():
+            if not r.resolved:
+                continue
+            out[r.query] = r.canonical
+        return out

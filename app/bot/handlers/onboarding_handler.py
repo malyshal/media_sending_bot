@@ -307,29 +307,49 @@ async def _apply_tag_op(callback: CallbackQuery, state: FSMContext, op: str,
                         chat_id: int, post_num: str, payload: str) -> tuple | None:
     """Toggle a tag per-post (three states):
     not added -> add to include (✅); added -> move to exclude (🚫);
-    excluded -> remove from exclude (➕)."""
+    excluded -> remove from exclude (➕).
+    Stores the canonical tag name when known so /next hits a real tag.
+    Refuses to add (none -> include) a tag the resolver has already marked
+    as broken — such tags only exist as a search query, not on the site."""
     tag = await _resolve_tag(callback, state, post_num, payload)
     if not tag:
         await callback.answer("Не удалось определить тег", show_alert=True)
         return None
     new_state = None
     async with async_session() as session:
+        from app.db.repositories.tag_alias_repository import TagAliasRepository
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
-        if tag in config.include_tags:
-            new_inc = [t for t in config.include_tags if t != tag]
-            new_exc = list(set(config.exclude_tags + [tag]))
+        alias_repo = TagAliasRepository(session)
+        known = await alias_repo.get(tag)
+        # Block "none -> include" for confirmed-broken tags
+        if (known and known.resolved and not known.canonical
+                and tag not in config.include_tags
+                and tag not in config.exclude_tags):
+            await callback.answer(
+                f"«{tag}» — не тег на JoyReactor, посты по нему не найти.",
+                show_alert=True,
+            )
+            return None
+        # If the query has a canonical name, operate on the canonical name so
+        # /next hits a real tag rather than the raw search query.
+        store_tag = tag
+        if known and known.resolved and known.canonical and known.canonical != tag:
+            store_tag = known.canonical
+        if store_tag in config.include_tags:
+            new_inc = [t for t in config.include_tags if t != store_tag]
+            new_exc = list(set(config.exclude_tags + [store_tag]))
             new_state = "exclude"
-        elif tag in config.exclude_tags:
-            new_exc = [t for t in config.exclude_tags if t != tag]
+        elif store_tag in config.exclude_tags:
+            new_exc = [t for t in config.exclude_tags if t != store_tag]
             new_inc = list(config.include_tags)
             new_state = "none"
         else:
-            new_inc = list(set(config.include_tags + [tag]))
-            new_exc = [t for t in config.exclude_tags if t != tag]
+            new_inc = list(set(config.include_tags + [store_tag]))
+            new_exc = [t for t in config.exclude_tags if t != store_tag]
             new_state = "include"
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
-    return new_state, tag
+    return new_state, store_tag
 
 
 async def _refresh_kb(callback: CallbackQuery, state: FSMContext, chat_id: int, post_num: str):

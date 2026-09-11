@@ -94,17 +94,28 @@ class MediaPrefetcher:
         from app.db.models.post import Post
         from app.db.models.chat import ChatConfig
         from app.db.repositories.chat_repository import ChatRepository
+        from app.db.repositories.tag_alias_repository import TagAliasRepository
 
         async with async_session() as session:
             rows = await session.execute(select(ChatConfig))
             configs = rows.scalars().all()
-
-        tags: set[str] = set()
-        for cfg in configs:
-            if cfg.include_tags:
-                tags.update(cfg.include_tags)
-        if not tags:
-            tags = {"memes"}
+            # Drop tags the resolver has already marked as broken, and
+            # rewrite user queries to their canonical names when known.
+            tags: set[str] = set()
+            for cfg in configs:
+                if cfg.include_tags:
+                    tags.update(cfg.include_tags)
+            alias_map = await TagAliasRepository(session).resolve_queries(list(tags))
+            filtered: list[str] = []
+            for tag in tags:
+                if tag in alias_map:
+                    canonical = alias_map[tag]
+                    if not canonical:
+                        continue
+                    filtered.append(canonical)
+                else:
+                    filtered.append(tag)
+            tags = set(filtered) if filtered else {"memes"}
 
         cached = 0
         for tag in tags:

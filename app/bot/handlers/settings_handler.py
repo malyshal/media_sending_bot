@@ -318,22 +318,37 @@ async def cb_tag_inc(callback: types.CallbackQuery, state: FSMContext, api_queue
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
 
-        new_inc = list(set(config.include_tags + [tag]))
-        new_exc = [t for t in config.exclude_tags if t != tag]
+        # If the resolver has already confirmed this query has no real tag on
+        # JoyReactor, refuse to add it (would just make /next hang on retries).
+        from app.db.repositories.tag_alias_repository import TagAliasRepository
+        alias_repo = TagAliasRepository(session)
+        known = await alias_repo.get(tag)
+        if known and known.resolved and not known.canonical:
+            await callback.answer(
+                f"«{tag}» — не найден на JoyReactor. Попробуйте другое название.",
+                show_alert=True,
+            )
+            return
+
+        # If the resolver already mapped the query to a canonical name, store
+        # the canonical name (not the raw query) so /next hits a real tag.
+        stored_tag = (known.canonical if known and known.resolved and known.canonical else tag)
+
+        new_inc = list(set(config.include_tags + [stored_tag]))
+        new_exc = [t for t in config.exclude_tags if t != stored_tag]
 
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
         config = await chat_repo.get_config(chat_id)
 
         # Canonical name resolution: if this query isn't a known API tag yet,
         # schedule a background lookup (TS #24 rate limits apply).
-        from app.db.repositories.tag_alias_repository import TagAliasRepository
-        alias_repo = TagAliasRepository(session)
-        known = await alias_repo.get(tag)
         if not known or not known.resolved:
             from app.services.tag_resolver import TagResolverService
             resolver = TagResolverService(None, api_queue, jr_client, None)
             asyncio.create_task(resolver.resolve_pending(limit=1))
             await callback.answer(f"Тег «{tag}» добавлен. Уточняю каноничное имя…")
+        else:
+            await callback.answer(f"Тег «{stored_tag}» добавлен ✅")
 
     await reset_state_keep_console(state)
     await render_callback(
@@ -353,23 +368,33 @@ async def cb_tag_exc(callback: types.CallbackQuery, state: FSMContext, api_queue
         chat_repo = ChatRepository(session)
         config = await chat_repo.get_config(chat_id)
 
-        new_exc = list(set(config.exclude_tags + [tag]))
-        new_inc = [t for t in config.include_tags if t != tag]
+        from app.db.repositories.tag_alias_repository import TagAliasRepository
+        alias_repo = TagAliasRepository(session)
+        known = await alias_repo.get(tag)
+        if known and known.resolved and not known.canonical:
+            await callback.answer(
+                f"«{tag}» — не найден на JoyReactor. Нечего исключать.",
+                show_alert=True,
+            )
+            return
+
+        stored_tag = (known.canonical if known and known.resolved and known.canonical else tag)
+
+        new_exc = list(set(config.exclude_tags + [stored_tag]))
+        new_inc = [t for t in config.include_tags if t != stored_tag]
 
         await chat_repo.update_tags(chat_id, new_inc, new_exc)
         config = await chat_repo.get_config(chat_id)
 
-        from app.db.repositories.tag_alias_repository import TagAliasRepository
-        alias_repo = TagAliasRepository(session)
-        known = await alias_repo.get(tag)
         if not known or not known.resolved:
             from app.services.tag_resolver import TagResolverService
             resolver = TagResolverService(None, api_queue, jr_client, None)
             asyncio.create_task(resolver.resolve_pending(limit=1))
             await callback.answer(f"Тег «{tag}» добавлен в exclude. Уточняю каноничное имя…")
+        else:
+            await callback.answer(f"Тег «{stored_tag}» добавлен в exclude 🚫")
 
     await reset_state_keep_console(state)
-    await callback.answer(f"Тег «{tag}» добавлен в exclude 🚫")
     await render_callback(
         callback, state,
         build_tag_menu_text(config),
