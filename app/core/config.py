@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     # Image CDN base (test deployments may point it at a local TCP proxy)
     img_cdn_base: str | None = None
 
+    # Long posts with more than this many "runs" (text blocks + media groups)
+    # are sent collapsed: only the first run, with a "Показать весь пост"
+    # button. Pressing it deletes the placeholder and sends the rest.
+    collapse_post_threshold: int = 3
+
+    # TTL for the in-process stash that holds the deferred runs while the
+    # user is reading the preview and deciding whether to expand.
+    collapsed_post_stash_ttl_seconds: int = 3600
+
     # TLS SNI overrides for proxy-based test deployments:
     # "connect-host:sni-host", e.g. "host.docker.internal:api.joyreactor.com".
     # Empty by default in production.

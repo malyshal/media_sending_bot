@@ -35,6 +35,7 @@ query GetPostsByTag($tagName: String!, $page: Int) {
           __typename
           ... on PostAttributePicture {
             id
+            insertId
             type
             image {
               id
@@ -73,6 +74,7 @@ query SearchPosts($query: String!, $page: Int) {
           __typename
           ... on PostAttributePicture {
             id
+            insertId
             image {
               id
               hasVideo

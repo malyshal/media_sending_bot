@@ -450,3 +450,63 @@ async def cb_go_to_settings(callback: CallbackQuery, state: FSMContext):
 async def cb_set_schedule_entry(callback: CallbackQuery, state: FSMContext):
     from app.bot.handlers.settings_handler import open_schedule_menu
     await open_schedule_menu(callback, state)
+
+
+# ---------------------------------------------------------- collapsed-post flow
+
+@router.callback_query(F.data.startswith("post_full:"))
+async def cb_post_full(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """User clicked "Показать весь пост" on a collapsed preview.
+
+    Deletes the placeholder message, looks up the stashed runs, and sends
+    the rest of the post in order. The tag keyboard is reattached to the
+    LAST message so the user can still toggle tags.
+    """
+    from app.services.media_manager import MediaManager
+    from app.services.delivery_service import DeliveryService
+    from app.bot.post_tag_keyboard import build_post_tags_keyboard
+
+    parts = callback.data.split(":", 3)
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, chat_id_s, post_num, token = parts
+    chat_id = int(chat_id_s)
+
+    # Look up the cached post + chat config to rebuild the tag keyboard.
+    async with async_session() as session:
+        chat_repo = ChatRepository(session)
+        config = await chat_repo.get_config(chat_id)
+        # Reconstruct the full global post id from the numeric part.
+        post_id = _full_post_id(post_num)
+        post = await session.get(Post, post_id)
+
+    if not post:
+        await callback.answer("Пост уже не в кэше 😢", show_alert=True)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
+
+    tag_kb = build_post_tags_keyboard(chat_id, post, config.include_tags, config.exclude_tags)
+
+    # We don't need a real PostService here — send_collapsed_from_token takes
+    # the cached post directly. The DeliveryService only needs MediaManager
+    # for downloading media.
+    delivery = DeliveryService(bot, post_service=None, media_manager=MediaManager())
+
+    try:
+        sent = await delivery.send_collapsed_from_token(
+            token, post, tag_kb,
+            chat_id_to_delete=chat_id,
+            message_id_to_delete=callback.message.message_id,
+            bot=bot,
+        )
+        if sent == 0:
+            await callback.answer("Срок действия ссылки истёк 😢", show_alert=True)
+        else:
+            await callback.answer()
+    except Exception as e:
+        logger.error("post_full_expand_failed", chat_id=chat_id, post_id=post.id, error=str(e))
+        await callback.answer("Не удалось развернуть пост 😢", show_alert=True)

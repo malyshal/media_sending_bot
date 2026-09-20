@@ -115,11 +115,22 @@ class JoyReactorClient:
 
     @staticmethod
     def _all_media_urls(post_id: str, attributes: List[Dict[str, Any]]) -> list[tuple[str, str]]:
-        """All media items of the post in order (TS #83: text + multiple media)."""
+        """All media items of the post in document order (TS #83: text + multiple media).
+        Falls back to insertId order when the API returns it; otherwise uses attribute order.
+        """
+        pics = [
+            a for a in (attributes or [])
+            if a.get("__typename") == "PostAttributePicture"
+        ]
+        # Prefer explicit insertId ordering when available so that markers in the
+        # post text (&attribute_insert_N&) map to the right media URL.
+        if pics and any(a.get("insertId") is not None for a in pics):
+            try:
+                pics = sorted(pics, key=lambda a: a.get("insertId") or 0)
+            except Exception:
+                pass
         result = []
-        for attr in attributes or []:
-            if attr.get("__typename") != "PostAttributePicture":
-                continue
+        for attr in pics:
             numeric_id = JoyReactorClient._decode_global_id_static(attr.get("id", ""))
             if not numeric_id.isdigit():
                 continue
