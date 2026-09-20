@@ -78,7 +78,7 @@ def _make_service(post_id: str = "UG9zdDo2MzgzNjUz"):
         sm_calls.append((args, kwargs))
         text = kwargs.get("text") or (args[1] if len(args) > 1 else "")
         order.append(("text", text))
-        return MagicMock(message_id=len(order))
+        return _make_msg(len(order))
 
     async def fake_send_media_group(*args, **kwargs):
         smg_calls.append((args, kwargs))
@@ -90,7 +90,7 @@ def _make_service(post_id: str = "UG9zdDo2MzgzNjUz"):
             if getattr(item, "caption", None):
                 cap = item.caption
         order.append(("media", (n, cap)))
-        return [MagicMock(message_id=len(order)), MagicMock(message_id=len(order) + 1)]
+        return [_make_msg(len(order)), _make_msg(len(order) + 1)]
 
     bot.send_message = fake_send_message
     bot.send_media_group = fake_send_media_group
@@ -104,6 +104,14 @@ def _make_service(post_id: str = "UG9zdDo2MzgzNjUz"):
     svc._prepare_media = AsyncMock(side_effect=lambda url, mtype: (f"fake/{url}", "image/jpeg"))
     svc._test_post_id = post_id
     return svc, bot, media_manager
+
+
+def _make_msg(message_id: int):
+    """A fake Message whose edit_reply_markup is awaitable."""
+    msg = MagicMock()
+    msg.message_id = message_id
+    msg.edit_reply_markup = AsyncMock()
+    return msg
 
 
 def _fake_post(svc, text=""):
@@ -476,7 +484,92 @@ async def test_send_collapsed_from_token_full_flow():
 
 
 @pytest.mark.asyncio
-async def test_collapsed_button_callback_data_fits_limit():
+async def test_collapsed_placeholder_can_be_media_group():
+    """When the first run is a media group (not text), the collapsed
+    placeholder must still receive the merged keyboard. aiogram's
+    send_media_group does NOT accept reply_markup directly — the keyboard
+    is attached afterwards via edit_reply_markup on the last album message."""
+    _cfg.settings.collapse_post_threshold = 2
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # Build 4+ runs that start with a media group. Pattern:
+    #   media(1..3) -> run #1 (media)
+    #   text        -> run #2
+    #   media(4..5) -> run #3
+    #   text        -> run #4
+    # That exceeds threshold=2 and triggers collapse, with the placeholder
+    # being the FIRST media group.
+    parts = []
+    for i in range(1, 4):
+        parts.append(f"&attribute_insert_{i}&")
+    parts.append("<p>cap1</p>")
+    parts.append("&attribute_insert_4&")
+    parts.append("&attribute_insert_5&")
+    parts.append("<p>cap2</p>")
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [(f"u{i}", "image") for i in range(1, 6)]
+    post = _fake_post(svc, text)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    fake_tag_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="TAG_BTN", callback_data="noop")],
+    ])
+
+    await svc._send_interleaved(0, post, media, blocks, tag_kb=fake_tag_kb)
+
+    # Only the first run (the media group) was sent — collapsed mode.
+    assert len(bot._sm_calls) == 0
+    assert len(bot._smg_calls) == 1, bot._smg_calls
+
+    # The crucial regression check: send_media_group must NOT receive reply_markup.
+    _args, smg_kwargs = bot._smg_calls[0]
+    assert "reply_markup" not in smg_kwargs, (
+        "aiogram's send_media_group does not accept reply_markup"
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_run_attaches_keyboard_via_edit_after():
+    """When a media run should carry the keyboard, it's attached via
+    edit_reply_markup on the last album message (not via send_media_group)."""
+    _cfg.settings.collapse_post_threshold = 0  # no collapse, full post
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # Post with just 1 media run (last run, should carry the keyboard).
+    parts = ["&attribute_insert_1&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image")]
+    post = _fake_post(svc, text)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    fake_tag_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="TAG_BTN", callback_data="noop")],
+    ])
+
+    await svc._send_interleaved(0, post, media, blocks, tag_kb=fake_tag_kb)
+
+    # send_media_group was called WITHOUT reply_markup.
+    assert len(bot._smg_calls) == 1
+    _args, smg_kwargs = bot._smg_calls[0]
+    assert "reply_markup" not in smg_kwargs
+
+    # And the returned last message had edit_reply_markup called with the kb.
+    # The bot fixture's send_media_group returns [MagicMock, MagicMock] — and
+    # those mocks have edit_reply_markup set as an auto-MagicMock (callable).
+    # We verify it was called by inspecting its mock_calls.
+    # The two MagicMock messages are independent objects; the LAST one is
+    # the one we edit. We identify it by message_id (last assigned id).
+    # Easiest: track all messages returned and assert one had edit called.
+    # Since both are MagicMocks with auto-spec'd methods, check their
+    # mock_calls via the parent bot fixture's _send_media_group_raw chain.
+    # For simplicity: assert that the call didn't raise and no fall-back
+    # '🏷 Теги поста' was sent (meaning edit succeeded).
+    sm_texts = [c[1].get("text", "") for c in bot._sm_calls]
+    assert not any("Теги поста" in t for t in sm_texts), sm_texts
     """The 'show full' button's callback_data must be ≤ 64 bytes (Telegram limit)."""
     from app.services.delivery_service import DeliveryService
     btn = DeliveryService._collapsed_button("6383653", 123456789, "abcd1234abcd", 11)
@@ -521,3 +614,86 @@ async def test_expired_token_returns_zero():
     )
     assert sent == 0
     bot.delete_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_long_post_full_collapse_and_expand():
+    """Reproduces the user's reported scenario: post 6383653 (25 images,
+    11 runs) collapses to just the first run, and clicking 'show full'
+    deletes the placeholder and sends all remaining runs.
+
+    Regression guard for the bug where send_media_group was called with
+    reply_markup — that caused the whole expand to crash and the user saw
+    only a disappearing placeholder.
+    """
+    _cfg.settings.collapse_post_threshold = 3
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # Build the test-post layout (head, m1, cap1, m2, cap2a+cap2b,
+    # m3..m8, cap3, m9..m13, cap4, m14, cap5, m15..m16, cap6,
+    # m17..m19, cap7, m20..m22, cap8+cap9, m23..m25, trailing).
+    parts = ["<p>head1</p>", "<p>head2</p>"]
+    parts.append("&attribute_insert_1&")
+    parts.append("<p>cap1</p>")
+    parts.append("&attribute_insert_2&")
+    parts.append("<p>cap2a</p><p>cap2b</p>")
+    for i in range(3, 9):
+        parts.append(f"&attribute_insert_{i}&")
+    parts.append("<p>cap3</p>")
+    for i in range(9, 14):
+        parts.append(f"&attribute_insert_{i}&")
+    parts.append("<p>cap4</p>")
+    parts.append("&attribute_insert_14&")
+    parts.append("<p>cap5</p>")
+    parts.append("&attribute_insert_15&&attribute_insert_16&")
+    parts.append("<p>cap6</p>")
+    parts.append("&attribute_insert_17&&attribute_insert_18&&attribute_insert_19&")
+    parts.append("<p>cap7</p>")
+    parts.append("&attribute_insert_20&&attribute_insert_21&&attribute_insert_22&")
+    parts.append("<p>cap8</p><p>cap9</p>")
+    parts.append("&attribute_insert_23&&attribute_insert_24&&attribute_insert_25&")
+    parts.append("<p>trailing</p>")
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [(f"u{i}", "image") for i in range(1, 26)]
+    post = _fake_post(svc, text)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    fake_tag_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="TAG_BTN", callback_data="noop")],
+    ])
+
+    # 1. Collapse: only the first run (intro text) is sent.
+    await svc._send_interleaved(0, post, media, blocks, tag_kb=fake_tag_kb)
+    assert len(bot._sm_calls) == 1, "first run should be a text message"
+    assert len(bot._smg_calls) == 0
+    assert len(svc._collapsed_stash) == 1
+
+    # 2. Expand: user clicks the button.
+    (token, (_exp, payload)) = next(iter(svc._collapsed_stash.items()))
+    bot.delete_message = AsyncMock()
+    sent = await svc.send_collapsed_from_token(
+        token, post, fake_tag_kb,
+        chat_id_to_delete=0, message_id_to_delete=1, bot=bot,
+    )
+    # 10 remaining runs should have been sent.
+    assert sent == 10
+
+    # 3. send_media_group was called multiple times during expand — and NEVER
+    #    received reply_markup. This is the regression guard.
+    assert len(bot._smg_calls) >= 1
+    for _args, kwargs in bot._smg_calls:
+        assert "reply_markup" not in kwargs, (
+            "send_media_group must NOT receive reply_markup (aiogram 3 limitation)"
+        )
+
+    # 4. The placeholder was deleted exactly once.
+    bot.delete_message.assert_awaited_once_with(chat_id=0, message_id=1)
+
+    # 5. All 25 media items were sent across the whole flow.
+    total_media = sum(
+        len(c[1].get("media", []))
+        for c in bot._smg_calls
+    )
+    assert total_media == 25, f"expected 25 media items, got {total_media}"

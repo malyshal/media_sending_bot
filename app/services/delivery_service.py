@@ -518,13 +518,33 @@ class DeliveryService:
         cap = caption if caption else None
         if cap and len(cap) > TELEGRAM_CAPTION_LIMIT:
             cap = cap[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
-        messages = await self._send_media_group_raw(
-            chat_id, chunk, caption=cap,
-            reply_markup=(tag_kb if with_kb else None),
-        )
+        # NOTE: aiogram's send_media_group does NOT accept reply_markup.
+        # We send the album first, then edit the last message's markup if
+        # requested.
+        messages = await self._send_media_group_raw(chat_id, chunk, caption=cap)
+        last_msg = None
         if isinstance(messages, list) and messages:
-            return messages[-1]
-        return messages
+            last_msg = messages[-1]
+        elif messages is not None:
+            last_msg = messages
+        if with_kb and tag_kb and last_msg is not None:
+            try:
+                await last_msg.edit_reply_markup(reply_markup=tag_kb)
+            except Exception as e:
+                # Some messages (e.g. documents in older groups) cannot be
+                # edited for markup. Fall back to a separate small message.
+                logger.warning(
+                    "media_group_edit_kb_failed",
+                    chat_id=chat_id, message_id=getattr(last_msg, "message_id", None),
+                    error=str(e),
+                )
+                try:
+                    await self.bot.send_message(
+                        chat_id=chat_id, text="🏷 Теги поста:", reply_markup=tag_kb,
+                    )
+                except Exception:
+                    pass
+        return last_msg
 
     # ----------------------------------------------------- collapsed delivery
 
@@ -687,9 +707,10 @@ class DeliveryService:
         chat_id: int,
         chunk: list[tuple[int, Path, str]],
         caption: Optional[str] = None,
-        reply_markup=None,
     ):
-        """Send a media group (no caption processing — caller already prepared it)."""
+        """Send a media group. aiogram's send_media_group does NOT accept
+        reply_markup — the caller must attach the keyboard afterwards via
+        edit_reply_markup on the last message of the returned album."""
         from aiogram.utils.media_group import MediaGroupBuilder
 
         if not chunk:
@@ -701,7 +722,7 @@ class DeliveryService:
             else:
                 builder.add_video(media=types.FSInputFile(path))
         return await self.bot.send_media_group(
-            chat_id=chat_id, media=builder.build(), reply_markup=reply_markup,
+            chat_id=chat_id, media=builder.build(),
         )
 
     async def send_media_group_with_tags(self, chat_id: int, processed: list[tuple[Path, str]], post, include_tags: list | None = None, exclude_tags: list | None = None, caption: str | None = None) -> types.Message:
