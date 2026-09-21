@@ -697,3 +697,153 @@ async def test_long_post_full_collapse_and_expand():
         for c in bot._smg_calls
     )
     assert total_media == 25, f"expected 25 media items, got {total_media}"
+
+
+# --------------------------------------------------------- source link appending
+
+@pytest.mark.asyncio
+async def test_source_link_appended_to_last_text_run():
+    """When show_links is on, the source URL must end up on the LAST run —
+    a trailing text run gets it appended to the message body."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    parts = ["<p>head</p>", "&attribute_insert_1&", "<p>trailing</p>"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks, show_links=True)
+
+    # The trailing text run (last one) should carry the source link.
+    last_text = [c for c in bot._sm_calls if c[1].get("text")]
+    assert last_text, "expected at least one send_message call"
+    last_text_str = last_text[-1][1]["text"]
+    assert "joyreactor.cc/post/6383653" in last_text_str, last_text_str
+
+    # The intro text run (first) should NOT carry the link.
+    intro_text = [c for c in bot._sm_calls if c[1].get("text", "").startswith("head")]
+    if intro_text:
+        assert "joyreactor.cc/post/" not in intro_text[0][1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_source_link_appended_to_last_media_run_caption():
+    """When the last run is a media group, the source link goes onto its
+    caption (Telegram renders media captions below the images)."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # Layout: intro text + 1 media run (last). The link must land in the
+    # media group's caption.
+    parts = ["<p>head</p>", "&attribute_insert_1&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks, show_links=True)
+
+    # Inspect the media group's caption.
+    assert bot._smg_calls, "expected a send_media_group call"
+    media_items = bot._smg_calls[-1][1]["media"]
+    captions = [m.caption for m in media_items if getattr(m, "caption", None)]
+    assert any("joyreactor.cc/post/6383653" in c for c in captions), captions
+
+
+@pytest.mark.asyncio
+async def test_source_link_not_in_intermediate_runs():
+    """The link must appear only on the LAST message — not on every media
+    group in the middle of the post (which would spam the chat)."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # 3 media runs + trailing text. Link goes only on the trailing text.
+    parts = []
+    parts.append("&attribute_insert_1&")
+    parts.append("<p>cap1</p>")
+    parts.append("&attribute_insert_2&&attribute_insert_3&")
+    parts.append("<p>cap2</p>")
+    parts.append("&attribute_insert_4&")
+    parts.append("<p>trailing</p>")
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [(f"u{i}", "image") for i in range(1, 5)]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks, show_links=True)
+
+    # Inspect each media group's caption — none should contain the link
+    # (except the last media group, which IS the last run if there's no
+    # trailing text). With this layout, the last run IS trailing text, so
+    # NO media group should carry the link.
+    for _args, kwargs in bot._smg_calls:
+        for item in kwargs["media"]:
+            if getattr(item, "caption", None):
+                assert "joyreactor.cc/post/" not in item.caption, (
+                    f"intermediate media caption leaked the link: {item.caption!r}"
+                )
+
+    # The link is on the trailing text run.
+    last_text = bot._sm_calls[-1][1]["text"]
+    assert "joyreactor.cc/post/6383653" in last_text
+
+
+@pytest.mark.asyncio
+async def test_source_link_off_when_disabled():
+    """When show_links is off (default), no link appears anywhere."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    parts = ["<p>head</p>", "&attribute_insert_1&", "<p>trailing</p>"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks, show_links=False)
+
+    # No message body should contain the link.
+    for _args, kwargs in bot._sm_calls:
+        assert "joyreactor.cc/post/" not in kwargs.get("text", ""), kwargs
+    for _args, kwargs in bot._smg_calls:
+        for item in kwargs["media"]:
+            assert not (getattr(item, "caption", None) and "joyreactor.cc/post/" in item.caption), item
+
+
+@pytest.mark.asyncio
+async def test_collapsed_placeholder_has_no_link():
+    """The collapsed preview must NOT carry the source link — it appears
+    only on the last message after the user expands the post."""
+    _cfg.settings.collapse_post_threshold = 2
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    parts = ["<p>head</p>", "&attribute_insert_1&", "<p>cap</p>"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks, show_links=True)
+
+    # Placeholder is the first run (text "head"). It must not have the link.
+    assert bot._sm_calls, "placeholder must be a text run"
+    placeholder_text = bot._sm_calls[0][1]["text"]
+    assert "joyreactor.cc/post/" not in placeholder_text, placeholder_text
+
+    # Expand and check that the link DOES appear on the trailing run.
+    (token, (_exp, payload)) = next(iter(svc._collapsed_stash.items()))
+    bot.delete_message = AsyncMock()
+    await svc.send_collapsed_from_token(
+        token, post, None,
+        chat_id_to_delete=0, message_id_to_delete=1, bot=bot,
+    )
+    # The trailing text run ("cap") now carries the link.
+    last_text = bot._sm_calls[-1][1]["text"]
+    assert "joyreactor.cc/post/6383653" in last_text

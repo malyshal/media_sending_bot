@@ -453,9 +453,14 @@ class DeliveryService:
             for i, run in enumerate(runs):
                 is_last = i == len(runs) - 1
                 with_kb = bool(keyboard_on_last and is_last and tag_kb)
+                # Attach the source link to the LAST run only — appending it
+                # to every run would spam the chat. The link goes onto the
+                # last text run's body, or onto the last media group's caption.
+                run_link = source_link if is_last else ""
                 if run["kind"] == "text":
                     msg = await self._send_text_run(
-                        chat_id, run["text"], source_link=source_link, with_kb=with_kb, tag_kb=tag_kb,
+                        chat_id, run["text"], source_link=run_link,
+                        with_kb=with_kb, tag_kb=tag_kb,
                     )
                 else:
                     # Resolve 1-based indices to actual prepared media.
@@ -466,7 +471,9 @@ class DeliveryService:
                     if not chunk:
                         continue
                     msg = await self._send_media_run(
-                        chat_id, chunk, caption=run["caption"], with_kb=with_kb, tag_kb=tag_kb,
+                        chat_id, chunk, caption=run["caption"],
+                        with_kb=with_kb, tag_kb=tag_kb,
+                        source_link=run_link,
                     )
                 if msg:
                     last_message = msg
@@ -491,10 +498,13 @@ class DeliveryService:
         with_kb: bool = False,
         tag_kb=None,
     ) -> Optional[types.Message]:
+        """Send a standalone text message. The source link is appended
+        whenever one was requested by the caller (show_post_links on), so
+        links appear regardless of whether the last run is text or media."""
         if not text.strip():
             return None
         text_to_send = text.strip()
-        if with_kb and source_link and not text_to_send.rstrip().endswith(source_link):
+        if source_link and not text_to_send.rstrip().endswith(source_link):
             text_to_send = text_to_send.rstrip() + f"\n\n🔗 {source_link}"
         elif not text_to_send and source_link:
             text_to_send = f"🔗 {source_link}"
@@ -512,10 +522,19 @@ class DeliveryService:
         caption: Optional[str] = None,
         with_kb: bool = False,
         tag_kb=None,
+        source_link: str = "",
     ) -> Optional[types.Message]:
         if not chunk:
             return None
         cap = caption if caption else None
+        # Append the source link to the media caption so users can find the
+        # original post — same behaviour as the legacy album path.
+        if source_link:
+            if cap:
+                if not cap.rstrip().endswith(source_link):
+                    cap = cap.rstrip() + f"\n\n🔗 {source_link}"
+            else:
+                cap = f"🔗 {source_link}"
         if cap and len(cap) > TELEGRAM_CAPTION_LIMIT:
             cap = cap[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
         # NOTE: aiogram's send_media_group does NOT accept reply_markup.
@@ -623,7 +642,12 @@ class DeliveryService:
     ) -> Optional[types.Message]:
         """Send only the FIRST run of a long post, with the tag keyboard
         plus a "show full" button. Stash the rest in memory; the button
-        callback handler will pick them up and send them on demand."""
+        callback handler will pick them up and send them on demand.
+
+        The source link is intentionally omitted from the placeholder —
+        it's added to the LAST message of the full expansion (via the
+        stashed runs), not to the collapsed preview.
+        """
         from app.bot.post_tag_keyboard import short_post_id
 
         await self._stash_gc()
@@ -642,7 +666,7 @@ class DeliveryService:
             "show_links": show_links,
         })
 
-        # Send JUST the first run, with both keyboards merged.
+        # Send JUST the first run, with both keyboards merged, NO source link.
         first_run = runs[0]
         collapse_btn = self._collapsed_button(post_num, chat_id, token, total_runs)
         extra_kb = InlineKeyboardMarkup(inline_keyboard=[[collapse_btn]])
@@ -650,7 +674,7 @@ class DeliveryService:
 
         return await self._send_runs(
             chat_id, post, media_items, [first_run],
-            show_links=show_links,
+            show_links=False,  # link goes on the last expanded run, not here
             tag_kb=merged_kb,
             keyboard_on_last=True,
         )
