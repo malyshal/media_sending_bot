@@ -1190,3 +1190,91 @@ async def test_expand_long_post_no_truncation():
     for t in texts:
         assert len(t) <= 4096
         assert t.rstrip() != "…"
+
+
+# --------------------------------------------------- dead-chat handling
+
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from app.services.delivery_service import _is_fatal_chat_error
+
+
+def test_fatal_chat_error_detection():
+    assert _is_fatal_chat_error(TelegramForbiddenError(method=MagicMock(), message="Forbidden: bot was kicked from the group chat"))
+    assert _is_fatal_chat_error(TelegramForbiddenError(method=MagicMock(), message="Forbidden: bot was blocked by the user"))
+    assert _is_fatal_chat_error(TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found"))
+    assert _is_fatal_chat_error(TelegramBadRequest(method=MagicMock(), message="Bad Request: user is deactivated"))
+    # Transient / unrelated errors must NOT be fatal.
+    assert not _is_fatal_chat_error(TelegramBadRequest(method=MagicMock(), message="Bad Request: message is too long"))
+    assert not _is_fatal_chat_error(ConnectionError("CDN down"))
+
+
+@pytest.mark.asyncio
+async def test_kicked_chat_aborts_batch_and_disables_auto_send():
+    """Reproduces the production log: bot kicked from a group with auto-send
+    on. Delivery must stop immediately (no retry storm on the same post) and
+    the chat's auto-send must be switched off."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    async def forbidden_send_media_group(*args, **kwargs):
+        raise TelegramForbiddenError(method=MagicMock(), message="Forbidden: bot was kicked from the group chat")
+
+    async def forbidden_send_message(*args, **kwargs):
+        raise TelegramForbiddenError(method=MagicMock(), message="Forbidden: bot was kicked from the group chat")
+
+    bot.send_media_group = forbidden_send_media_group
+    bot.send_message = forbidden_send_message
+
+    post = _fake_post(svc, "&attribute_insert_1&")
+    svc.post_service.get_next_post_for_chat = AsyncMock(return_value=post)
+    svc.post_service.repo.try_lock_post_for_chat = AsyncMock(return_value=True)
+    svc.post_service.client._all_media_urls = MagicMock(return_value=[("u1", "image")])
+    svc._unlock_post = AsyncMock()
+    svc._disable_chat_auto_send = AsyncMock()
+
+    result = await svc.send_next_post(0, [], [], ignore_history=False)
+    assert result is None
+    svc._disable_chat_auto_send.assert_awaited_once_with(0)
+    svc._unlock_post.assert_awaited_once_with(0, post.id)
+
+
+@pytest.mark.asyncio
+async def test_batch_stops_after_dead_chat_single_attempt():
+    """The scheduler batch must make exactly ONE delivery attempt for a dead
+    chat instead of burning max_posts + MAX_SKIP_DEPTH attempts."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    attempts = {"n": 0}
+
+    async def fake_send_next_post(*args, **kwargs):
+        attempts["n"] += 1
+        return None  # what send_next_post now returns for a dead chat
+
+    svc.send_next_post = fake_send_next_post
+    sent = await svc.send_batch_posts(chat_id=0, include_tags=[], exclude_tags=[], max_posts=5)
+    assert sent == 0
+    assert attempts["n"] == 1, "batch must break on the first dead-chat signal"
+
+
+@pytest.mark.asyncio
+async def test_transient_error_still_retries_next_post():
+    """Regular failures (dead CDN etc.) keep the retry semantics — the batch
+    moves on to the next candidate post."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    calls = {"n": 0}
+
+    async def fake_send_next_post(*args, **kwargs):
+        calls["n"] += 1
+        from app.services.delivery_service import _DeliveryRetryable
+        if calls["n"] <= 2:
+            raise _DeliveryRetryable()
+        return MagicMock()  # third candidate goes through
+
+    svc.send_next_post = fake_send_next_post
+    sent = await svc.send_batch_posts(chat_id=0, include_tags=[], exclude_tags=[], max_posts=1)
+    assert sent == 1
+    assert calls["n"] == 3

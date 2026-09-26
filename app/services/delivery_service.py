@@ -349,6 +349,25 @@ def _is_parse_error(e: TelegramBadRequest) -> bool:
     return "can't parse entities" in msg or "unsupported start tag" in msg or "unclosed tag" in msg
 
 
+# Permanent chat-side failures: retrying can never succeed, so the delivery
+# must abort and the chat's auto-send schedule must be switched off instead
+# of burning attempts every scheduler tick.
+_FATAL_CHAT_MARKERS = (
+    "bot was kicked from the group chat",
+    "bot is not a member of the group chat",
+    "bot was blocked by the user",
+    "chat not found",
+    "user is deactivated",
+    "group chat was upgraded to a supergroup",
+    "peer id invalid",
+)
+
+
+def _is_fatal_chat_error(e: Exception) -> bool:
+    msg = (str(e) or "").lower()
+    return any(marker in msg for marker in _FATAL_CHAT_MARKERS)
+
+
 def _make_caption(text: Optional[str], link: str = "", limit: int = TELEGRAM_CAPTION_LIMIT) -> str:
     """TS #34: post text as caption (+optional source link), truncated to the Telegram limit.
     The source link is always kept visible: text is truncated first.
@@ -522,6 +541,11 @@ class DeliveryService:
                 message = await self.bot.send_message(chat_id=chat_id, text=text)
                 metrics.inc("posts_sent")
                 return message
+            if _is_fatal_chat_error(e):
+                # Chat is gone for good (kicked/blocked/not found): stop the
+                # whole batch, switch off auto-send. Not the post's fault —
+                # unlock it so it goes out when the chat is alive again.
+                return await self._abort_dead_chat(chat_id, post.id, e, ignore_history)
             metrics.inc("delivery_failures")
             logger.error(
                 "delivery_failed", chat_id=chat_id, post_id=post.id,
@@ -535,6 +559,9 @@ class DeliveryService:
             raise _DeliveryRetryable() from e
 
         except Exception as e:
+            if _is_fatal_chat_error(e):
+                # Includes TelegramForbiddenError ("bot was kicked/blocked").
+                return await self._abort_dead_chat(chat_id, post.id, e, ignore_history)
             metrics.inc("delivery_failures")
             logger.error(
                 "delivery_failed", chat_id=chat_id, post_id=post.id,
@@ -550,6 +577,28 @@ class DeliveryService:
             for p in processed_paths:
                 if p:
                     await self.media_manager.cleanup_file(p)
+
+    async def _abort_dead_chat(self, chat_id: int, post_id: str, e: Exception, ignore_history: bool) -> None:
+        """Permanent chat failure (kicked/blocked/gone): log once, disable the
+        chat's auto-send schedule, unlock the post, and stop the delivery —
+        returning None makes send_batch_posts break instead of retrying."""
+        metrics.inc("chat_unavailable")
+        logger.warning(
+            "chat_unavailable_auto_send_disabled", chat_id=chat_id, post_id=post_id,
+            error=str(e) or repr(e), exc_type=type(e).__name__,
+        )
+        if not ignore_history:
+            await self._unlock_post(chat_id, post_id)
+        await self._disable_chat_auto_send(chat_id)
+        return None
+
+    async def _disable_chat_auto_send(self, chat_id: int):
+        try:
+            from app.db.repositories.chat_repository import ChatRepository
+            async with async_session() as session:
+                await ChatRepository(session).set_auto_send(chat_id, False)
+        except Exception as e:
+            logger.error("disable_auto_send_failed", chat_id=chat_id, error=str(e))
 
     def _post_media_items(self, post: Post) -> list[tuple[str, str]]:
         """Media list for delivery: all media if available, else the single primary item.
