@@ -1388,6 +1388,39 @@ async def test_caption_above_media_on_albums_and_singles():
     assert albums and albums[0]["caption"] and albums[0]["caption_above"] is True
 
 
+def test_album_show_caption_above_media_uniform():
+    """Regression (production): Telegram requires show_caption_above_media to
+    be the SAME for every item of a media group — the whole album must carry
+    the same flag as the captioned first item, otherwise sendMediaGroup fails
+    with 'parameter show_caption_above_media must be the same for all
+    messages' and the post expansion aborts mid-way."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # Text BETWEEN media items stays as the album caption (intro text before
+    # the first media would be pulled out as a standalone message instead).
+    parts = ["&attribute_insert_1&", "<p>cap</p>",
+             "&attribute_insert_2&&attribute_insert_3&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image"), ("u3", "image")]
+    post = _fake_post(svc, text)
+
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(svc._send_interleaved(0, post, media, blocks))
+    finally:
+        loop.close()
+
+    assert len(bot._smg_calls) == 1
+    items = bot._smg_calls[0][1]["media"]
+    flags = {item.show_caption_above_media for item in items}
+    assert len(flags) == 1, f"album flags differ across items: {flags}"
+    assert flags == {True}  # captioned album -> above for the whole group
+
+
 @pytest.mark.asyncio
 async def test_single_media_never_uses_send_media_group():
     """Runs with exactly one picture go out as send_photo — Telegram requires

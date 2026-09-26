@@ -1195,25 +1195,27 @@ class DeliveryService:
         if not chunk:
             return None
         builder = MediaGroupBuilder()
+        # Telegram requires show_caption_above_media to be THE SAME for all
+        # items of a media group, so the value is per-group, not per-item.
+        # Caption ABOVE the album reads like the site: text, then pictures.
+        cap_above = bool(caption)
         for i, (_, path, mime) in enumerate(chunk):
             is_first = i == 0
             item_caption = caption if is_first else None
             item_parse_mode = parse_mode if (is_first and caption is not None) else None
-            # Caption ABOVE the album reads like the site: text, then pictures.
-            item_cap_above = bool(item_caption)
             if mime.startswith("image/"):
                 builder.add_photo(
                     media=types.FSInputFile(path),
                     caption=item_caption,
                     parse_mode=item_parse_mode,
-                    show_caption_above_media=item_cap_above,
+                    show_caption_above_media=cap_above,
                 )
             else:
                 builder.add_video(
                     media=types.FSInputFile(path),
                     caption=item_caption,
                     parse_mode=item_parse_mode,
-                    show_caption_above_media=item_cap_above,
+                    show_caption_above_media=cap_above,
                 )
         return await self.bot.send_media_group(
             chat_id=chat_id, media=builder.build(),
