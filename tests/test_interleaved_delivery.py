@@ -73,6 +73,8 @@ def _make_service(post_id: str = "UG9zdDo2MzgzNjUz"):
     order: list[tuple[str, object]] = []
     sm_calls: list[tuple[tuple, dict]] = []  # (args, kwargs) for send_message
     smg_calls: list[tuple[tuple, dict]] = []  # (args, kwargs) for send_media_group
+    sp_calls: list[tuple[tuple, dict]] = []  # (args, kwargs) for send_photo
+    sv_calls: list[tuple[tuple, dict]] = []  # (args, kwargs) for send_video
 
     async def fake_send_message(*args, **kwargs):
         sm_calls.append((args, kwargs))
@@ -92,11 +94,25 @@ def _make_service(post_id: str = "UG9zdDo2MzgzNjUz"):
         order.append(("media", (n, cap)))
         return [_make_msg(len(order)), _make_msg(len(order) + 1)]
 
+    async def fake_send_photo(*args, **kwargs):
+        sp_calls.append((args, kwargs))
+        order.append(("media", (1, kwargs.get("caption"))))
+        return _make_msg(len(order))
+
+    async def fake_send_video(*args, **kwargs):
+        sv_calls.append((args, kwargs))
+        order.append(("media", (1, kwargs.get("caption"))))
+        return _make_msg(len(order))
+
     bot.send_message = fake_send_message
     bot.send_media_group = fake_send_media_group
+    bot.send_photo = fake_send_photo
+    bot.send_video = fake_send_video
     bot._order = order
     bot._sm_calls = sm_calls
     bot._smg_calls = smg_calls
+    bot._sp_calls = sp_calls
+    bot._sv_calls = sv_calls
     post_service = MagicMock()
     media_manager = MagicMock()
     media_manager.cleanup_file = AsyncMock()
@@ -126,6 +142,41 @@ def _fake_post(svc, text=""):
 def _runs_calls(bot_mock):
     """Return the recorded call order from the wrapped bot mocks."""
     return list(bot_mock._order)
+
+
+def _all_media_sends(bot_mock):
+    """All media-bearing sends: albums + single photos/videos.
+    Returns list of dicts: {"kind": "album"|"photo"|"video",
+    "caption": str|None, "parse_mode": str|None, "n_items": int,
+    "caption_above": bool|None, "reply_markup": ...}"""
+    out = []
+    for _args, kw in bot_mock._smg_calls:
+        items = kw.get("media", [])
+        cap_item = next((m for m in items if getattr(m, "caption", None)), None)
+        out.append({
+            "kind": "album", "n_items": len(items),
+            "caption": getattr(cap_item, "caption", None) if cap_item else None,
+            "parse_mode": getattr(cap_item, "parse_mode", None) if cap_item else None,
+            "caption_above": getattr(cap_item, "show_caption_above_media", None) if cap_item else None,
+            "reply_markup": None,
+        })
+    for _args, kw in bot_mock._sp_calls:
+        out.append({
+            "kind": "photo", "n_items": 1,
+            "caption": kw.get("caption"),
+            "parse_mode": kw.get("parse_mode"),
+            "caption_above": kw.get("show_caption_above_media"),
+            "reply_markup": kw.get("reply_markup"),
+        })
+    for _args, kw in bot_mock._sv_calls:
+        out.append({
+            "kind": "video", "n_items": 1,
+            "caption": kw.get("caption"),
+            "parse_mode": kw.get("parse_mode"),
+            "caption_above": kw.get("show_caption_above_media"),
+            "reply_markup": kw.get("reply_markup"),
+        })
+    return out
 
 
 @pytest.mark.asyncio
@@ -310,7 +361,8 @@ async def test_collapse_sends_only_first_run_with_button():
 
 @pytest.mark.asyncio
 async def test_collapse_stashes_remaining_runs():
-    """After sending the first run, the rest are stashed for later expansion."""
+    """The stash holds ALL runs: the expansion must re-send the first one too,
+    because the placeholder (which carries the intro) is deleted on expand."""
     _cfg.settings.collapse_post_threshold = 2
     svc, bot, _ = _make_service()
     svc._collapsed_stash.clear()
@@ -333,8 +385,8 @@ async def test_collapse_stashes_remaining_runs():
     assert payload["post_id"] == post.id
     # The layout (head, m1, cap1, m2, cap2, m3, cap3) becomes 5 runs:
     #   text(head), media(1), media(2 cap=cap1), media(3 cap=cap2), text(cap3)
-    # Stashed = runs[1:] = 4 entries.
-    assert len(payload["remaining_runs"]) == 4
+    # ALL of them are stashed (the placeholder is deleted on expand).
+    assert len(payload["runs"]) == 5
     # All 3 media urls are preserved.
     stashed_media = payload["media_items"]
     assert len(stashed_media) == 3
@@ -532,8 +584,9 @@ async def test_collapsed_placeholder_can_be_media_group():
 
 @pytest.mark.asyncio
 async def test_media_run_attaches_keyboard_via_edit_after():
-    """When a media run should carry the keyboard, it's attached via
-    edit_reply_markup on the last album message (not via send_media_group)."""
+    """A single-media run is sent via send_photo with the keyboard attached
+    DIRECTLY (send_media_group doesn't accept reply_markup, and single items
+    don't go through it at all)."""
     _cfg.settings.collapse_post_threshold = 0  # no collapse, full post
     svc, bot, _ = _make_service()
     svc._collapsed_stash.clear()
@@ -552,24 +605,17 @@ async def test_media_run_attaches_keyboard_via_edit_after():
 
     await svc._send_interleaved(0, post, media, blocks, tag_kb=fake_tag_kb)
 
-    # send_media_group was called WITHOUT reply_markup.
-    assert len(bot._smg_calls) == 1
-    _args, smg_kwargs = bot._smg_calls[0]
-    assert "reply_markup" not in smg_kwargs
-
-    # And the returned last message had edit_reply_markup called with the kb.
-    # The bot fixture's send_media_group returns [MagicMock, MagicMock] — and
-    # those mocks have edit_reply_markup set as an auto-MagicMock (callable).
-    # We verify it was called by inspecting its mock_calls.
-    # The two MagicMock messages are independent objects; the LAST one is
-    # the one we edit. We identify it by message_id (last assigned id).
-    # Easiest: track all messages returned and assert one had edit called.
-    # Since both are MagicMocks with auto-spec'd methods, check their
-    # mock_calls via the parent bot fixture's _send_media_group_raw chain.
-    # For simplicity: assert that the call didn't raise and no fall-back
-    # '🏷 Теги поста' was sent (meaning edit succeeded).
+    # Single picture went out via send_photo (never a 1-item album).
+    assert len(bot._sp_calls) == 1
+    assert len(bot._smg_calls) == 0
+    _args, kwargs = bot._sp_calls[0]
+    assert kwargs.get("reply_markup") is fake_tag_kb
+    # No fallback '🏷 Теги поста' message was needed.
     sm_texts = [c[1].get("text", "") for c in bot._sm_calls]
     assert not any("Теги поста" in t for t in sm_texts), sm_texts
+
+
+def test_collapsed_button_callback_data_fits_limit():
     """The 'show full' button's callback_data must be ≤ 64 bytes (Telegram limit)."""
     from app.services.delivery_service import DeliveryService
     btn = DeliveryService._collapsed_button("6383653", 123456789, "abcd1234abcd", 11)
@@ -677,12 +723,12 @@ async def test_long_post_full_collapse_and_expand():
         token, post, fake_tag_kb,
         chat_id_to_delete=0, message_id_to_delete=1, bot=bot,
     )
-    # 10 remaining runs should have been sent.
-    assert sent == 10
+    # ALL 11 runs are re-sent (the placeholder that carried the intro is deleted).
+    assert sent == 11
 
     # 3. send_media_group was called multiple times during expand — and NEVER
     #    received reply_markup. This is the regression guard.
-    assert len(bot._smg_calls) >= 1
+    assert len(bot._smg_calls) + len(bot._sp_calls) >= 1
     for _args, kwargs in bot._smg_calls:
         assert "reply_markup" not in kwargs, (
             "send_media_group must NOT receive reply_markup (aiogram 3 limitation)"
@@ -691,11 +737,9 @@ async def test_long_post_full_collapse_and_expand():
     # 4. The placeholder was deleted exactly once.
     bot.delete_message.assert_awaited_once_with(chat_id=0, message_id=1)
 
-    # 5. All 25 media items were sent across the whole flow.
-    total_media = sum(
-        len(c[1].get("media", []))
-        for c in bot._smg_calls
-    )
+    # 5. All 25 media items were sent across the whole flow (albums + singles).
+    total_media = sum(len(c[1].get("media", [])) for c in bot._smg_calls)
+    total_media += len(bot._sp_calls) + len(bot._sv_calls)
     assert total_media == 25, f"expected 25 media items, got {total_media}"
 
 
@@ -747,11 +791,10 @@ async def test_source_link_appended_to_last_media_run_caption():
 
     await svc._send_interleaved(0, post, media, blocks, show_links=True)
 
-    # Inspect the media group's caption.
-    assert bot._smg_calls, "expected a send_media_group call"
-    media_items = bot._smg_calls[-1][1]["media"]
-    captions = [m.caption for m in media_items if getattr(m, "caption", None)]
-    assert any("joyreactor.cc/post/6383653" in c for c in captions), captions
+    # The single picture's caption must carry the source link.
+    assert bot._sp_calls, "expected a send_photo call"
+    cap = bot._sp_calls[-1][1].get("caption")
+    assert cap and "joyreactor.cc/post/6383653" in cap, cap
 
 
 @pytest.mark.asyncio
@@ -934,12 +977,11 @@ async def test_interleaved_sends_with_parse_mode_html():
     body = bot._sm_calls[0][1]["text"]
     assert "<b>head</b>" in body
 
-    # Album caption: first media item carries caption + parse_mode HTML.
-    media_items = bot._smg_calls[-1][1]["media"]
-    captions = [m.caption for m in media_items if getattr(m, "caption", None)]
-    parse_modes = [m.parse_mode for m in media_items if getattr(m, "caption", None)]
-    assert captions and all(pm == "HTML" for pm in parse_modes), (captions, parse_modes)
-    assert "<i>cap</i>" in captions[0]
+    # The captioned single photo carries parse_mode HTML.
+    captioned = [kw for _a, kw in bot._sp_calls if kw.get("caption")]
+    assert captioned, "expected a captioned send_photo call"
+    assert all(kw.get("parse_mode") == "HTML" for kw in captioned)
+    assert any("<i>cap</i>" in kw.get("caption", "") for kw in captioned)
 
 
 @pytest.mark.asyncio
@@ -990,14 +1032,14 @@ async def test_media_run_falls_back_to_plain_caption_on_parse_error():
 
     calls = []
 
-    async def flaky_send_media_group(*args, **kwargs):
+    async def flaky_send_photo(*args, **kwargs):
         calls.append(kwargs)
-        # Fail the HTML-captioned album (run 2), let everything else through.
+        # Fail the HTML-captioned picture (run 2), let everything else through.
         if len(calls) == 2:
             raise TelegramBadRequest(method=MagicMock(), message="Bad Request: can't parse entities: tag broken")
-        return [_make_msg(len(calls))]
+        return _make_msg(len(calls))
 
-    bot.send_media_group = flaky_send_media_group
+    bot.send_photo = flaky_send_photo
 
     parts = ["&attribute_insert_1&<p><i>caption</i></p>&attribute_insert_2&"]
     text = "".join(parts)
@@ -1009,19 +1051,16 @@ async def test_media_run_falls_back_to_plain_caption_on_parse_error():
 
     # calls = [run1 ok (no caption), run2 HTML fail, run2 plain retry]
     assert len(calls) == 3
-    # First run went out with HTML parse mode (its caption slot is unused).
-    first_items = calls[0]["media"]
-    assert all(not getattr(m, "caption", None) for m in first_items)
+    # First run went out without a caption.
+    assert not calls[0].get("caption")
     # Second run: HTML caption rejected...
-    second_items = calls[1]["media"]
-    assert any(m.parse_mode == "HTML" for m in second_items if getattr(m, "caption", None))
+    assert calls[1].get("parse_mode") == "HTML"
+    assert "<i>" in calls[1].get("caption", "")
     # ...then retried with a plain caption (text between media splits the
     # two inserts into separate single-item groups).
-    retry_items = calls[2]["media"]
-    caps = [m.caption for m in retry_items if getattr(m, "caption", None)]
-    assert caps and "<i>" not in caps[0]
-    assert "caption" in caps[0]
-    assert len(retry_items) == 1
+    assert calls[2].get("parse_mode") is None
+    assert "<i>" not in calls[2].get("caption", "")
+    assert "caption" in calls[2].get("caption", "")
 
 
 # --------------------------------------------------------- message splitting
@@ -1146,12 +1185,14 @@ async def test_oversized_caption_becomes_text_message():
     assert any("очень длинный абзац" in t for t in texts)
     full_text = next(t for t in texts if "очень длинный абзац" in t)
     assert "…" not in full_text or full_text.endswith("…") is False
-    # Album captions are empty (caption was promoted).
-    for _args, kwargs in bot._smg_calls:
-        for item in kwargs["media"]:
+    # No picture carries a caption (it was promoted to a text message).
+    for _args, kw in bot._smg_calls:
+        for item in kw["media"]:
             assert not getattr(item, "caption", None), item.caption
+    for _args, kw in bot._sp_calls + bot._sv_calls:
+        assert not kw.get("caption"), kw.get("caption")
     # All media delivered.
-    total = sum(len(k["media"]) for _a, k in bot._smg_calls)
+    total = sum(len(k["media"]) for _a, k in bot._smg_calls) + len(bot._sp_calls) + len(bot._sv_calls)
     assert total == 2
 
 
@@ -1225,6 +1266,8 @@ async def test_kicked_chat_aborts_batch_and_disables_auto_send():
 
     bot.send_media_group = forbidden_send_media_group
     bot.send_message = forbidden_send_message
+    bot.send_photo = forbidden_send_media_group
+    bot.send_video = forbidden_send_media_group
 
     post = _fake_post(svc, "&attribute_insert_1&")
     svc.post_service.get_next_post_for_chat = AsyncMock(return_value=post)
@@ -1278,3 +1321,89 @@ async def test_transient_error_still_retries_next_post():
     sent = await svc.send_batch_posts(chat_id=0, include_tags=[], exclude_tags=[], max_posts=1)
     assert sent == 1
     assert calls["n"] == 3
+
+
+# ------------------------------------------- expand re-sends intro + caption-above
+
+@pytest.mark.asyncio
+async def test_expand_resends_intro_text():
+    """The placeholder IS the first run; after it's deleted the expansion must
+    re-send the intro text — otherwise the post starts with a bare picture
+    and the beginning of the text is lost (production bug report)."""
+    _cfg.settings.collapse_post_threshold = 2
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    parts = ["<p><b>Вышла третья документалка</b></p>",
+             "&attribute_insert_1&",
+             "<p>cap</p>",
+             "&attribute_insert_2&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks, tag_kb=None)
+    (token, (_exp, payload)) = next(iter(svc._collapsed_stash.items()))
+
+    calls_before = len(bot._order)
+    bot.delete_message = AsyncMock()
+    sent = await svc.send_collapsed_from_token(token, post, None,
+                                               chat_id_to_delete=0,
+                                               message_id_to_delete=1, bot=bot)
+    # ALL runs re-sent: intro text + picture + picture with caption = 3.
+    assert sent == 3
+    new_calls = bot._order[calls_before:]
+    # The FIRST message after expand is the intro text again.
+    assert new_calls[0][0] == "text"
+    assert "Вышла третья документалка" in new_calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_caption_above_media_on_albums_and_singles():
+    """Captions render ABOVE the pictures (show_caption_above_media=True),
+    matching the site's text-then-image reading order."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # media(1) [single], text 'cap', media(2)+media(3) [album with caption].
+    parts = ["&attribute_insert_1&", "<p>cap</p>",
+             "&attribute_insert_2&&attribute_insert_3&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image"), ("u3", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks)
+
+    # Single photo (no caption here): show_caption_above_media must be False.
+    assert bot._sp_calls, "expected send_photo"
+    _a, photo_kw = bot._sp_calls[0]
+    assert photo_kw.get("show_caption_above_media") is False
+
+    # Album: captioned first item has show_caption_above_media=True.
+    sends = _all_media_sends(bot)
+    albums = [s for s in sends if s["kind"] == "album"]
+    assert albums and albums[0]["caption"] and albums[0]["caption_above"] is True
+
+
+@pytest.mark.asyncio
+async def test_single_media_never_uses_send_media_group():
+    """Runs with exactly one picture go out as send_photo — Telegram requires
+    2-10 items per media group, so a 1-item album is never attempted."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    parts = ["&attribute_insert_1&", "<p>a</p>",
+             "&attribute_insert_2&", "<p>b</p>",
+             "&attribute_insert_3&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image"), ("u3", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks)
+    assert len(bot._sp_calls) == 3
+    assert len(bot._smg_calls) == 0

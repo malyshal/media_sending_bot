@@ -925,6 +925,17 @@ class DeliveryService:
             parse_mode = None
         else:
             parse_mode = "HTML"
+
+        # Single-item runs go out as a plain photo/video message: Telegram's
+        # sendMediaGroup requires 2-10 items, and a lone picture with a
+        # caption is exactly the "текст над картинкой" block we want.
+        if len(chunk) == 1:
+            return await self._send_single_media(
+                chat_id, chunk[0][1], chunk[0][2],
+                caption=cap, parse_mode=parse_mode,
+                with_kb=with_kb, tag_kb=tag_kb,
+            )
+
         try:
             messages = await self._send_media_group_raw(
                 chat_id, chunk, caption=cap, parse_mode=parse_mode,
@@ -963,6 +974,41 @@ class DeliveryService:
                 except Exception:
                     pass
         return last_msg
+
+    async def _send_single_media(
+        self,
+        chat_id: int,
+        path: Path,
+        mime: str,
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = None,
+        with_kb: bool = False,
+        tag_kb=None,
+    ) -> Optional[types.Message]:
+        """One picture/video with a caption ABOVE it (show_caption_above_media)
+        — reads like the site's text-over-image layout. Keyboard attaches
+        directly (no edit dance needed for single messages)."""
+        kb = tag_kb if with_kb else None
+        common = dict(
+            chat_id=chat_id,
+            caption=caption,
+            parse_mode=parse_mode,
+            show_caption_above_media=bool(caption),
+            reply_markup=kb,
+        )
+        try:
+            if mime.startswith("image/"):
+                return await self.bot.send_photo(photo=types.FSInputFile(path), **common)
+            return await self.bot.send_video(video=types.FSInputFile(path), **common)
+        except TelegramBadRequest as e:
+            if not _is_parse_error(e):
+                raise
+            logger.warning("single_media_caption_parse_failed_plain_retry", chat_id=chat_id, error=str(e))
+            common["caption"] = _plain_fallback(caption) if caption else None
+            common["parse_mode"] = None
+            if mime.startswith("image/"):
+                return await self.bot.send_photo(photo=types.FSInputFile(path), **common)
+            return await self.bot.send_video(video=types.FSInputFile(path), **common)
 
     # ----------------------------------------------------- collapsed delivery
 
@@ -1040,12 +1086,13 @@ class DeliveryService:
         tag_kb,
     ) -> Optional[types.Message]:
         """Send only the FIRST run of a long post, with the tag keyboard
-        plus a "show full" button. Stash the rest in memory; the button
-        callback handler will pick them up and send them on demand.
+        plus a "show full" button. Stash ALL runs in memory: when the button
+        is pressed the placeholder (which IS the first run) is deleted, so
+        the expansion must re-send every run including the first one —
+        otherwise the intro text would be lost together with the placeholder.
 
         The source link is intentionally omitted from the placeholder —
-        it's added to the LAST message of the full expansion (via the
-        stashed runs), not to the collapsed preview.
+        it's added to the LAST message of the full expansion.
         """
         from app.bot.post_tag_keyboard import short_post_id
 
@@ -1054,18 +1101,19 @@ class DeliveryService:
         post_num = short_post_id(post.id)
         total_runs = len(runs)
 
-        # Stash everything we need to reconstruct the rest later; the token
+        # Stash everything we need to reconstruct the post later; the token
         # is the lookup key and goes into the button's callback_data.
         token = await self._stash_put({
             "chat_id": chat_id,
             "post_id": post.id,
             "post_num": post_num,
             "media_items": media_items,
-            "remaining_runs": runs[1:],
+            "runs": runs,  # ALL runs — the placeholder gets deleted on expand
             "show_links": show_links,
         })
 
-        # Send JUST the first run, with both keyboards merged, NO source link.
+        # Send JUST the first run as the preview, with both keyboards merged,
+        # NO source link.
         first_run = runs[0]
         collapse_btn = self._collapsed_button(post_num, chat_id, token, total_runs)
         extra_kb = InlineKeyboardMarkup(inline_keyboard=[[collapse_btn]])
@@ -1084,12 +1132,15 @@ class DeliveryService:
         post: Post,
         tag_kb,
     ) -> int:
-        """Send the runs stashed under `token_payload`. Called from the
-        'show full post' callback after the user has deleted the placeholder.
-        Returns the number of runs successfully sent."""
+        """Send ALL runs stashed under `token_payload` (including the first
+        one — the placeholder that carried it has just been deleted, so the
+        intro would otherwise be lost). Called from the 'show full post'
+        callback. Returns the number of runs successfully sent."""
         chat_id = token_payload["chat_id"]
         media_items = token_payload["media_items"]
-        runs: list[dict] = token_payload["remaining_runs"]
+        # "runs" = all runs; fall back to the old key for in-flight stashes
+        # from before a deploy.
+        runs: list[dict] = token_payload.get("runs") or token_payload.get("remaining_runs") or []
         show_links = token_payload.get("show_links", False)
 
         if not runs:
@@ -1148,17 +1199,21 @@ class DeliveryService:
             is_first = i == 0
             item_caption = caption if is_first else None
             item_parse_mode = parse_mode if (is_first and caption is not None) else None
+            # Caption ABOVE the album reads like the site: text, then pictures.
+            item_cap_above = bool(item_caption)
             if mime.startswith("image/"):
                 builder.add_photo(
                     media=types.FSInputFile(path),
                     caption=item_caption,
                     parse_mode=item_parse_mode,
+                    show_caption_above_media=item_cap_above,
                 )
             else:
                 builder.add_video(
                     media=types.FSInputFile(path),
                     caption=item_caption,
                     parse_mode=item_parse_mode,
+                    show_caption_above_media=item_cap_above,
                 )
         return await self.bot.send_media_group(
             chat_id=chat_id, media=builder.build(),
