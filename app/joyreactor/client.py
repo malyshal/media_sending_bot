@@ -181,11 +181,13 @@ class JoyReactorClient:
         )
 
     async def _parse_list_post(self, p: dict) -> Optional[JRPost]:
-        """Normalize a post entry from a list response."""
+        """Normalize a post entry from a list response.
+
+        ALL posts are kept, including text-only ones (no media): the cache
+        should mirror the tag feed as closely as possible, and text-only
+        posts are deliverable as text messages. Freshness matters more than
+        media presence."""
         media_url, media_type = self._media_from_attributes(p["id"], p.get("attributes", []))
-        if not media_url:
-            logger.warning("post_without_media_skipped", post_id=p["id"])
-            return None
         try:
             created_at = datetime.fromisoformat(p["createdAt"])
         except (KeyError, ValueError):

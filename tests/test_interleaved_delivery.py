@@ -1440,3 +1440,145 @@ async def test_single_media_never_uses_send_media_group():
     await svc._send_interleaved(0, post, media, blocks)
     assert len(bot._sp_calls) == 3
     assert len(bot._smg_calls) == 0
+
+
+# ------------------------------------------------- cache-only scheduled batch
+
+@pytest.mark.asyncio
+async def test_scheduled_batch_uses_cache_only():
+    """Scheduled delivery must NOT fall back to API fetching: with 2 cached
+    posts and limit 20, it sends exactly 2 and stops."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    fetch_calls = {"n": 0}
+
+    async def fake_fetch(chat_id, inc, exc, ignore_history=False, show_links=False, allow_fetch=True):
+        fetch_calls["n"] += 1
+        assert allow_fetch is False, "scheduled batch must run cache-only"
+        # Cache has exactly 2 unsent posts, then nothing.
+        if fake_fetch.calls >= 2:
+            return None
+        fake_fetch.calls += 1
+        return _fake_post(svc, f"<p>post {fake_fetch.calls}</p>")
+
+    fake_fetch.calls = 0
+    svc.send_next_post = fake_fetch
+
+    sent = await svc.send_batch_posts(
+        chat_id=0, include_tags=[], exclude_tags=[],
+        max_posts=20, allow_fetch=False,
+    )
+    assert sent == 2
+    assert fetch_calls["n"] == 3  # 2 hits + 1 miss, then the batch breaks
+
+
+@pytest.mark.asyncio
+async def test_interactive_next_still_fetches_from_api():
+    """/next keeps the API fallback: allow_fetch defaults to True."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    seen = []
+
+    async def fake_fetch(chat_id, inc, exc, ignore_history=False, show_links=False, allow_fetch=True):
+        seen.append(allow_fetch)
+        return None
+
+    svc.send_next_post = fake_fetch
+    await svc.send_batch_posts(chat_id=0, include_tags=[], exclude_tags=[], max_posts=1)
+    assert seen == [True]
+
+
+def test_get_next_post_cache_only_flag():
+    """get_next_post_for_chat with allow_fetch=False returns None once the
+    cache loop finds nothing (no API section is reached)."""
+    import asyncio
+    from unittest.mock import MagicMock, AsyncMock
+    from app.services.post_service import PostService
+
+    ps = PostService(client=MagicMock(), queue=MagicMock(), repo=MagicMock())
+    ps.repo.get_posts_by_tags = AsyncMock(return_value=[])  # empty cache
+    ps._resolve_fetch_tags = AsyncMock(return_value=["memes"])  # skip DB lookup
+
+    async def boom(*a, **kw):
+        raise AssertionError("API fetch must not be called in cache-only mode")
+
+    ps.queue.enqueue = boom
+
+    loop = asyncio.new_event_loop()
+    try:
+        out = loop.run_until_complete(
+            ps.get_next_post_for_chat(0, ["memes"], [], allow_fetch=False)
+        )
+    finally:
+        loop.close()
+    assert out is None
+
+
+# ------------------------------------------------- text-only posts in cache
+
+@pytest.mark.asyncio
+async def test_parse_list_post_keeps_text_only_posts():
+    """All posts are cached now — text-only ones too (no media = no skip)."""
+    from app.joyreactor.client import JoyReactorClient
+    raw = {
+        "id": "UG9zdDo2Mzg3NjQy",
+        "text": "<p>текстовый пост без картинок</p>",
+        "createdAt": "2026-09-26T10:00:00+00:00",
+        "postTags": [{"tag": {"id": "VGFnOjE=", "name": "memes"}}],
+        "attributes": [],
+    }
+    jr = await JoyReactorClient._parse_list_post(JoyReactorClient(), raw)
+    assert jr is not None
+    assert jr.media_url is None
+    assert jr.media_type is None
+    assert jr.tags == ["memes"]
+
+
+@pytest.mark.asyncio
+async def test_text_only_cached_post_sent_as_text_message():
+    """A cached text-only post (media_url='') goes out as a single HTML text
+    message with the tag keyboard — no media calls at all."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    post = _fake_post(svc, "<p>текстовый пост</p>")
+    post.media_url = ""           # text-only sentinel
+    post.media_type = "text"
+
+    blocks = svc._post_content_blocks(post.text)
+    # _post_media_items returns [] for text-only posts (media_url="").
+    assert svc._post_media_items(post) == []
+    svc.post_service.get_next_post_for_chat = AsyncMock(return_value=post)
+    svc.post_service.repo.try_lock_post_for_chat = AsyncMock(return_value=True)
+    svc._unlock_post = AsyncMock()
+
+    msg = await svc.send_next_post(0, [], [], ignore_history=True)
+    assert msg is not None
+    assert len(bot._sm_calls) == 1
+    kwargs = bot._sm_calls[0][1]
+    assert kwargs.get("parse_mode") == "HTML"
+    assert "текстовый пост" in kwargs["text"]
+    # No media was sent.
+    assert not bot._sp_calls and not bot._sv_calls and not bot._smg_calls
+
+
+@pytest.mark.asyncio
+async def test_mixed_post_with_markers_prefers_media():
+    """A post WITH media is unaffected by the text-only path."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    post = _fake_post(svc, "<p>cap</p>&attribute_insert_1&")
+    post.media_url = "u1"
+    post.media_type = "image"
+    svc.post_service.get_next_post_for_chat = AsyncMock(return_value=post)
+    svc.post_service.repo.try_lock_post_for_chat = AsyncMock(return_value=True)
+    svc._unlock_post = AsyncMock()
+
+    msg = await svc.send_next_post(0, [], [], ignore_history=True)
+    assert msg is not None
+    assert len(bot._sp_calls) + len(bot._smg_calls) == 1

@@ -45,23 +45,27 @@ class SchedulerService:
                     continue
                 logger.info("scheduled_send_triggered", chat_id=config.chat_id)
 
+                # Cache-only delivery: the batch sends "up to N messages —
+                # however many the cache has" and never pulls from the API.
+                # The cache is kept warm by the media/post prefetcher.
                 sent_count = await self.delivery_service.send_batch_posts(
                     chat_id=config.chat_id,
                     include_tags=config.include_tags,
                     exclude_tags=config.exclude_tags,
                     max_posts=config.schedule_max_posts,
                     show_links=config.show_post_links,
+                    allow_fetch=False,
                 )
 
-                # TS #41: timestamp only after at least one delivered post.
-                # TS #103/#85: if no posts -> no timestamp update, so the batch
-                # is retried on the next loop once posts appear.
+                # The slot is consumed no matter how many posts were in the
+                # cache (even 0): no per-minute top-up retries. Whatever the
+                # prefetcher adds will go out at the NEXT scheduled slot.
+                config.last_batch_time = now_utc.replace(tzinfo=None)
+                await session.commit()
                 if sent_count > 0:
-                    config.last_batch_time = now_utc.replace(tzinfo=None)
-                    await session.commit()
                     logger.info("scheduled_send_completed", chat_id=config.chat_id, sent_count=sent_count)
                 else:
-                    logger.info("scheduled_send_no_posts", chat_id=config.chat_id)
+                    logger.info("scheduled_send_cache_empty", chat_id=config.chat_id)
             except Exception as e:
                 logger.error("schedule_check_error", chat_id=config.chat_id, error=str(e))
 

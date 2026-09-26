@@ -75,6 +75,9 @@ class MediaPrefetcher:
 
     def _media_items(self, post) -> list:
         from app.joyreactor.client import JoyReactorClient
+        # Text-only cached posts (media_url="") have nothing to prefetch.
+        if not post.media_url:
+            return []
         raw = post.raw_data if isinstance(post.raw_data, dict) else None
         items = []
         if raw:
@@ -127,13 +130,12 @@ class MediaPrefetcher:
                 logger.error("post_prefetch_fetch_failed", tag=tag, error=str(e))
                 continue
             for jr_p in jr_posts:
-                if not jr_p.media_url:
-                    continue
+                # Cache ALL fresh posts, text-only included (media_url="").
                 db_post = Post(
                     id=jr_p.id,
                     text=jr_p.text,
-                    media_url=jr_p.media_url,
-                    media_type=jr_p.media_type or "image",
+                    media_url=jr_p.media_url or "",
+                    media_type=jr_p.media_type or "text",
                     tags=jr_p.tags,
                     created_at=jr_p.created_at,
                     updated_at=datetime.utcnow(),

@@ -59,7 +59,7 @@ class PostService:
                     resolved.append(tag)
         return resolved
 
-    async def get_next_post_for_chat(self, chat_id: int, include_tags: List[str], exclude_tags: List[str], ignore_history: bool = False) -> Optional[Post]:
+    async def get_next_post_for_chat(self, chat_id: int, include_tags: List[str], exclude_tags: List[str], ignore_history: bool = False, allow_fetch: bool = True) -> Optional[Post]:
         # 0. Drop known-broken include_tags (resolver already confirmed
         # they have no real tag on JoyReactor). Otherwise /next would keep
         # retrying the API on the same dead queries every time.
@@ -73,6 +73,12 @@ class PostService:
         for post in candidate_posts:
             if ignore_history or not await self.repo.is_post_sent(chat_id, post.id):
                 return post
+
+        # Scheduled delivery serves ONLY the cache: whatever is there now is
+        # the batch ("до N сообщений — сколько есть"). Interactive /next keeps
+        # the API fallback below.
+        if not allow_fetch:
+            return None
 
         # 2. If no suitable post in cache, try to fetch new ones from API
         # Process all include tags to support multiple tags (TS Section 16)
@@ -111,15 +117,15 @@ class PostService:
 
         # TS #18: cache ALL fetched posts BEFORE selecting a candidate,
         # so subsequent /next requests hit the local cache instead of the API.
+        # Text-only posts are cached too (media_url="", media_type="text"):
+        # the cache mirrors the tag feed, freshness matters more than media.
         from datetime import datetime as _dt
         for jr_p in unique_posts.values():
-            if not jr_p.media_url:
-                continue
             db_post = Post(
                 id=jr_p.id,
                 text=jr_p.text,
-                media_url=jr_p.media_url,
-                media_type=jr_p.media_type or "image",
+                media_url=jr_p.media_url or "",
+                media_type=jr_p.media_type or "text",
                 tags=jr_p.tags,
                 created_at=jr_p.created_at,
                 # TS #14: cache TTL is measured from CACHING time (updated_at),
@@ -131,11 +137,6 @@ class PostService:
 
         # Select candidate from cached posts (exclude after API, TS #29)
         for jr_p in unique_posts.values():
-            # Skip posts without resolvable media
-            if not jr_p.media_url:
-                logger.warning("post_has_no_media", post_id=jr_p.id)
-                continue
-
             # Check if post contains any exclude tags
             if any(ex_tag in jr_p.tags for ex_tag in exclude_tags):
                 continue
@@ -144,8 +145,8 @@ class PostService:
                 db_post = await self.repo.save_post(Post(
                     id=jr_p.id,
                     text=jr_p.text,
-                    media_url=jr_p.media_url,
-                    media_type=jr_p.media_type or "image",
+                    media_url=jr_p.media_url or "",
+                    media_type=jr_p.media_type or "text",
                     tags=jr_p.tags,
                     created_at=jr_p.created_at,
                     updated_at=_dt.utcnow(),

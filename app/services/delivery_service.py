@@ -398,11 +398,15 @@ class DeliveryService:
         self.post_service = post_service
         self.media_manager = media_manager
 
-    async def send_batch_posts(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], max_posts: int, ignore_history: bool = False, show_links: bool = False) -> int:
+    async def send_batch_posts(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], max_posts: int, ignore_history: bool = False, show_links: bool = False, allow_fetch: bool = True) -> int:
         """
         Sends a batch of posts to a chat. Returns number of posts successfully sent.
         Broken posts (dead CDN links, oversized media) are skipped, bounded by
         MAX_SKIP_DEPTH to obey TS #74 (no infinite recursive search).
+
+        allow_fetch=False (scheduled delivery): serve ONLY what is already in
+        the cache — "up to N messages, however many the cache has" — and stop
+        as soon as the cache is exhausted instead of fetching from the API.
         """
         sent_count = 0
         attempts = 0
@@ -410,7 +414,7 @@ class DeliveryService:
         while sent_count < max_posts and attempts < max_attempts:
             attempts += 1
             try:
-                message = await self.send_next_post(chat_id, include_tags, exclude_tags, ignore_history=ignore_history, show_links=show_links)
+                message = await self.send_next_post(chat_id, include_tags, exclude_tags, ignore_history=ignore_history, show_links=show_links, allow_fetch=allow_fetch)
             except _DeliveryRetryable:
                 continue
             if message:
@@ -419,9 +423,9 @@ class DeliveryService:
                 break
         return sent_count
 
-    async def send_next_post(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], ignore_history: bool = False, _depth: int = 0, show_links: bool = False, post: Optional[Post] = None) -> Optional[types.Message]:
+    async def send_next_post(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], ignore_history: bool = False, _depth: int = 0, show_links: bool = False, post: Optional[Post] = None, allow_fetch: bool = True) -> Optional[types.Message]:
         # 1. Get candidate post (or use the explicitly requested one)
-        post = post if post is not None else await self.post_service.get_next_post_for_chat(chat_id, include_tags, exclude_tags, ignore_history=ignore_history)
+        post = post if post is not None else await self.post_service.get_next_post_for_chat(chat_id, include_tags, exclude_tags, ignore_history=ignore_history, allow_fetch=allow_fetch)
         if not post:
             logger.info("no_suitable_post_found", chat_id=chat_id)
             return None
@@ -434,12 +438,29 @@ class DeliveryService:
         if not ignore_history:
             if not await self.post_service.repo.try_lock_post_for_chat(chat_id, post.id):
                 logger.info("post_already_locked_by_another_process", chat_id=chat_id, post_id=post.id)
-                return await self._retry_bounded(chat_id, include_tags, exclude_tags, ignore_history, _depth, show_links)
+                return await self._retry_bounded(chat_id, include_tags, exclude_tags, ignore_history, _depth, show_links, allow_fetch)
 
         processed_paths: list[Path] = []
         try:
             # 3. Prepare media (TS #83: a post may contain several media items)
             media_items = self._post_media_items(post)
+
+            # Text-only post (media_url="" in cache): deliver as a plain HTML
+            # text message. The post is already locked in history, so nothing
+            # is lost if the text turns out to be empty.
+            if not media_items:
+                tag_kb = build_post_tags_keyboard(chat_id, post, include_tags, exclude_tags)
+                body = to_telegram_html(post.text or "")
+                if not body and not show_links:
+                    logger.info("text_only_post_empty_skipped", chat_id=chat_id, post_id=post.id)
+                    return None
+                message = await self._send_text_run(
+                    chat_id, body,
+                    source_link=_post_link(post) if show_links else "",
+                    with_kb=True, tag_kb=tag_kb,
+                )
+                metrics.inc("posts_sent")
+                return message
 
             # 4. Try interleaved text+media delivery when the post text actually
             # contains &attribute_insert_N& markers — produces the same "text
@@ -1258,10 +1279,10 @@ class DeliveryService:
                 builder.add_video(media=types.FSInputFile(path))
         return await self.bot.send_media_group(chat_id=chat_id, media=builder.build())
 
-    async def _retry_bounded(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], ignore_history: bool, depth: int, show_links: bool = False) -> Optional[types.Message]:
+    async def _retry_bounded(self, chat_id: int, include_tags: list[str], exclude_tags: list[str], ignore_history: bool, depth: int, show_links: bool = False, allow_fetch: bool = True) -> Optional[types.Message]:
         if depth >= MAX_SKIP_DEPTH:
             return None
-        return await self.send_next_post(chat_id, include_tags, exclude_tags, ignore_history=ignore_history, _depth=depth + 1, show_links=show_links)
+        return await self.send_next_post(chat_id, include_tags, exclude_tags, ignore_history=ignore_history, _depth=depth + 1, show_links=show_links, allow_fetch=allow_fetch)
 
     async def _unlock_post(self, chat_id: int, post_id: str):
         async with async_session() as session:

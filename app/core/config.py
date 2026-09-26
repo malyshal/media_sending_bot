@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # Application Settings
     log_level: str = "INFO"
     log_retention_days: int = 7
-    cache_retention_hours: int = 6
+    cache_retention_hours: int = 48
     max_fresh_posts_for_batch: int = 20
     max_media_size_mb: int = 50
     default_timezone: str = "Europe/Minsk"
