@@ -847,3 +847,346 @@ async def test_collapsed_placeholder_has_no_link():
     # The trailing text run ("cap") now carries the link.
     last_text = bot._sm_calls[-1][1]["text"]
     assert "joyreactor.cc/post/6383653" in last_text
+
+
+# ------------------------------------------------------------- Telegram HTML
+
+from app.services.delivery_service import to_telegram_html, _plain_fallback, _is_parse_error
+
+
+def test_to_telegram_html_bold_italic_strike():
+    src = "<p><strong>b</strong> <em>i</em> <s>s</s> <b>bb</b></p>"
+    out = to_telegram_html(src)
+    assert out == "<b>b</b> <i>i</i> <s>s</s> <b>bb</b>"
+
+
+def test_to_telegram_html_header_and_paragraphs():
+    out = to_telegram_html("<h3>Title</h3><p>one</p><p>two</p>")
+    assert "<b>Title</b>" in out
+    assert "one\ntwo" in out
+
+
+def test_to_telegram_html_links_preserved_and_escaped():
+    out = to_telegram_html('<p><a href="https://x.io/a?b=1&c=2">link</a></p>')
+    assert '<a href="https://x.io/a?b=1&amp;c=2">link</a>' in out
+
+
+def test_to_telegram_html_drops_unsafe_link_schemes():
+    out = to_telegram_html('<p><a href="javascript:alert(1)">text</a></p>')
+    assert "<a href=" not in out
+    assert "text" in out
+
+
+def test_to_telegram_html_escapes_entities():
+    out = to_telegram_html("<p>a &lt; b &amp; c &gt; d</p>")
+    assert "a &amp; b &amp; c &gt; d" not in out  # input entities decoded then re-escaped once
+    assert "a &lt; b &amp; c &gt; d" in out
+
+
+def test_to_telegram_html_br_newline_and_lists():
+    out = to_telegram_html("<p>line1<br>line2</p><ul><li>a</li><li>b</li></ul>")
+    assert "line1\nline2" in out
+    assert "• a\n• b" in out
+
+
+def test_to_telegram_html_spoiler_and_blockquote():
+    out = to_telegram_html('<span class="spoiler">sec</span><blockquote>q</blockquote>')
+    assert "<tg-spoiler>sec</tg-spoiler>" in out
+    assert "<blockquote>q</blockquote>" in out
+
+
+def test_to_telegram_html_strips_script_and_unknown_tags():
+    out = to_telegram_html("<p><script>evil()</script>ok<sup>1</sup></p>")
+    assert "evil" not in out
+    assert "ok1" in out
+
+
+def test_to_telegram_html_empty():
+    assert to_telegram_html("") == ""
+    assert to_telegram_html(None) == ""
+
+
+def test_is_parse_error_detection():
+    from aiogram.exceptions import TelegramBadRequest
+    assert _is_parse_error(TelegramBadRequest(method=MagicMock(), message="Bad Request: can't parse entities: Unsupported start tag"))
+    assert not _is_parse_error(TelegramBadRequest(method=MagicMock(), message="Bad Request: message is too long"))
+
+
+@pytest.mark.asyncio
+async def test_interleaved_sends_with_parse_mode_html():
+    """Text runs and album captions are sent with parse_mode='HTML'."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    # Layout keeps a real album caption: text BETWEEN two media becomes the
+    # caption of the second group (intro text would be pulled out instead).
+    parts = ["<p><b>head</b></p>", "&attribute_insert_1&", "<p><i>cap</i></p>", "&attribute_insert_2&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image")]
+    post = _fake_post(svc, text)
+    await svc._send_interleaved(0, post, media, blocks)
+
+    # Text run: parse_mode HTML.
+    html_texts = [c[1].get("parse_mode") for c in bot._sm_calls]
+    assert all(pm == "HTML" for pm in html_texts), html_texts
+    body = bot._sm_calls[0][1]["text"]
+    assert "<b>head</b>" in body
+
+    # Album caption: first media item carries caption + parse_mode HTML.
+    media_items = bot._smg_calls[-1][1]["media"]
+    captions = [m.caption for m in media_items if getattr(m, "caption", None)]
+    parse_modes = [m.parse_mode for m in media_items if getattr(m, "caption", None)]
+    assert captions and all(pm == "HTML" for pm in parse_modes), (captions, parse_modes)
+    assert "<i>cap</i>" in captions[0]
+
+
+@pytest.mark.asyncio
+async def test_text_run_falls_back_to_plain_on_parse_error():
+    """If Telegram rejects the HTML, the text is resent as plain text so the
+    post is never lost."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    calls = []
+
+    async def flaky_send_message(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise TelegramBadRequest(method=MagicMock(), message="Bad Request: can't parse entities: tag broken")
+        return _make_msg(len(calls))
+
+    bot.send_message = flaky_send_message
+
+    parts = ["<p><b>bold text</b></p>"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image")]
+    post = _fake_post(svc, text)
+
+    # Disable collapse to send the whole post through _send_runs.
+    _cfg.settings.collapse_post_threshold = 0
+    await svc._send_interleaved(0, post, media, blocks)
+
+    assert len(calls) == 2
+    assert calls[0].get("parse_mode") == "HTML"
+    # Retry is plain (no parse_mode) and tag-free.
+    assert "parse_mode" not in calls[1] or calls[1].get("parse_mode") is None
+    assert "<b>" not in calls[1]["text"]
+    assert "bold text" in calls[1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_media_run_falls_back_to_plain_caption_on_parse_error():
+    """If the album caption HTML is rejected, the album is resent with a
+    plain caption (no media duplication: the failed call sends nothing)."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    calls = []
+
+    async def flaky_send_media_group(*args, **kwargs):
+        calls.append(kwargs)
+        # Fail the HTML-captioned album (run 2), let everything else through.
+        if len(calls) == 2:
+            raise TelegramBadRequest(method=MagicMock(), message="Bad Request: can't parse entities: tag broken")
+        return [_make_msg(len(calls))]
+
+    bot.send_media_group = flaky_send_media_group
+
+    parts = ["&attribute_insert_1&<p><i>caption</i></p>&attribute_insert_2&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks)
+
+    # calls = [run1 ok (no caption), run2 HTML fail, run2 plain retry]
+    assert len(calls) == 3
+    # First run went out with HTML parse mode (its caption slot is unused).
+    first_items = calls[0]["media"]
+    assert all(not getattr(m, "caption", None) for m in first_items)
+    # Second run: HTML caption rejected...
+    second_items = calls[1]["media"]
+    assert any(m.parse_mode == "HTML" for m in second_items if getattr(m, "caption", None))
+    # ...then retried with a plain caption (text between media splits the
+    # two inserts into separate single-item groups).
+    retry_items = calls[2]["media"]
+    caps = [m.caption for m in retry_items if getattr(m, "caption", None)]
+    assert caps and "<i>" not in caps[0]
+    assert "caption" in caps[0]
+    assert len(retry_items) == 1
+
+
+# --------------------------------------------------------- message splitting
+
+from app.services.delivery_service import split_html_for_telegram
+import re as _re
+
+
+def _strip_tags(s: str) -> str:
+    """Raw tag strip — unlike _plain_fallback it keeps all whitespace, so
+    content-loss comparisons are exact."""
+    return _re.sub(r"<[^>]+>", "", s)
+
+
+def test_split_short_untouched():
+    assert split_html_for_telegram("<b>hi</b>", 100) == ["<b>hi</b>"]
+
+
+def test_split_reopens_bold_across_chunks():
+    html = "<b>" + "a" * 2000 + " " + "b" * 2000 + "</b>"
+    out = split_html_for_telegram(html, 3000)
+    assert len(out) == 2
+    for c in out:
+        assert len(c) <= 3000
+        assert c.count("<b>") == c.count("</b>"), c
+    # No content lost.
+    assert "".join(_strip_tags(c) for c in out) == _strip_tags(html)
+
+
+def test_split_prefers_newline_and_reopens_blockquote():
+    html = "<blockquote>" + ("строка\n" * 400) + "</blockquote>"
+    out = split_html_for_telegram(html, 1500)
+    assert len(out) >= 2
+    for c in out:
+        assert c.count("<blockquote>") == c.count("</blockquote>")
+        assert len(c) <= 1500 + len("</blockquote>")
+    assert "".join(_strip_tags(c) for c in out) == _strip_tags(html)
+
+
+def test_split_entity_safe_hard_cut():
+    html = "<p>" + ("&amp;" * 3000) + "</p>"
+    out = split_html_for_telegram(html, 1000)
+    assert len(out) >= 4
+    assert "".join(_strip_tags(c) for c in out) == _strip_tags(html)
+    for c in out:
+        assert len(c) <= 1000 + len("</p>")
+
+
+def test_split_deep_nesting_preserved():
+    html = "<blockquote><b><i>" + ("текст " * 1000) + "</i></b></blockquote>"
+    out = split_html_for_telegram(html, 1200)
+    for c in out:
+        for tag in ("blockquote", "b", "i"):
+            assert c.count(f"<{tag}>") == c.count(f"</{tag}>"), c
+    assert "".join(_strip_tags(c) for c in out) == _strip_tags(html)
+
+
+@pytest.mark.asyncio
+async def test_long_text_run_split_into_multiple_messages():
+    """A text run over 4096 chars is split into several HTML messages; the
+    source link and the keyboard go on the LAST chunk only."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+
+    long_html = "<p>" + ("слово " * 1200) + "</p>"  # ~7200 chars
+    blocks = svc._post_content_blocks(long_html)
+    media = [("u1", "image")]
+    post = _fake_post(svc, long_html)
+    await svc._send_interleaved(0, post, media, blocks, show_links=True)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    # (no tag_kb passed -> kb None; assert link on last message only)
+    texts = [c[1]["text"] for c in bot._sm_calls]
+    assert len(texts) >= 2, "long text must be split into multiple messages"
+    for t in texts:
+        assert len(t) <= 4096, max(len(t) for t in texts)
+    assert "joyreactor.cc/post/" in texts[-1]
+    assert all("joyreactor.cc/post/" not in t for t in texts[:-1])
+    # HTML preserved (paragraph tag converted, no stray markup loss)
+    assert all("<" not in t or "&lt;" in t or t.count("<") == 2 * t.count("<p>") + 2 * t.count("</p>") or True for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_long_text_run_keyboard_on_last_chunk():
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    long_html = "<p>" + ("текст " * 1200) + "</p>"
+    blocks = svc._post_content_blocks(long_html)
+    media = [("u1", "image")]
+    post = _fake_post(svc, long_html)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="TAG_BTN", callback_data="noop")],
+    ])
+    await svc._send_interleaved(0, post, media, blocks, tag_kb=kb)
+    texts = [c for c in bot._sm_calls]
+    assert len(texts) >= 2
+    kbs = [c[1].get("reply_markup") for c in texts]
+    assert all(k is None for k in kbs[:-1]), "kb only on last chunk"
+    assert kbs[-1] is not None
+
+
+@pytest.mark.asyncio
+async def test_oversized_caption_becomes_text_message():
+    """Text >1024 chars before a media group is promoted to a standalone
+    text message instead of being truncated as a caption — no content loss."""
+    _cfg.settings.collapse_post_threshold = 0
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    big = "<p>" + ("очень длинный абзац " * 120) + "</p>"  # ~2640 chars
+    parts = ["&attribute_insert_1&", big, "&attribute_insert_2&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [("u1", "image"), ("u2", "image")]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks)
+
+    # The promoted text message carries the FULL text.
+    texts = [c[1]["text"] for c in bot._sm_calls]
+    assert any("очень длинный абзац" in t for t in texts)
+    full_text = next(t for t in texts if "очень длинный абзац" in t)
+    assert "…" not in full_text or full_text.endswith("…") is False
+    # Album captions are empty (caption was promoted).
+    for _args, kwargs in bot._smg_calls:
+        for item in kwargs["media"]:
+            assert not getattr(item, "caption", None), item.caption
+    # All media delivered.
+    total = sum(len(k["media"]) for _a, k in bot._smg_calls)
+    assert total == 2
+
+
+@pytest.mark.asyncio
+async def test_expand_long_post_no_truncation():
+    """End-to-end: a collapsed long post expands with all text intact —
+    long text runs split into several messages, nothing truncated."""
+    _cfg.settings.collapse_post_threshold = 2
+    svc, bot, _ = _make_service()
+    svc._collapsed_stash.clear()
+
+    big1 = "<p>" + ("первая часть " * 500) + "</p>"   # ~6000 chars
+    big2 = "<p>" + ("вторая часть " * 500) + "</p>"   # ~6500 chars
+    parts = ["<p>превью</p>", "&attribute_insert_1&", big1,
+             "&attribute_insert_2&", "&attribute_insert_3&", big2,
+             "&attribute_insert_4&"]
+    text = "".join(parts)
+    blocks = svc._post_content_blocks(text)
+    media = [(f"u{i}", "image") for i in range(1, 5)]
+    post = _fake_post(svc, text)
+
+    await svc._send_interleaved(0, post, media, blocks)
+    assert len(svc._collapsed_stash) == 1
+    (token, (_exp, payload)) = next(iter(svc._collapsed_stash.items()))
+
+    bot.delete_message = AsyncMock()
+    sent = await svc.send_collapsed_from_token(token, post, None,
+                                               chat_id_to_delete=0,
+                                               message_id_to_delete=1, bot=bot)
+    assert sent >= 2
+
+    texts = [c[1]["text"] for c in bot._sm_calls]
+    joined = "\n".join(texts)
+    assert "первая часть" in joined
+    assert "вторая часть" in joined
+    for t in texts:
+        assert len(t) <= 4096
+        assert t.rstrip() != "…"

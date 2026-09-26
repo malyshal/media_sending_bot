@@ -40,7 +40,7 @@ class _DeliveryRetryable(Exception):
 
 
 import re as _re
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 _ATTR_PLACEHOLDER = _re.compile(r"&attribute_insert_\d+&")
 
@@ -53,6 +53,300 @@ def _clean_html(text: str) -> str:
     soup = BeautifulSoup(text, "html.parser")
     plain = soup.get_text(separator="\n", strip=True)
     return plain
+
+
+# ------------------------------------------------------------ Telegram HTML
+
+# Telegram Bot API HTML subset: https://core.telegram.org/bots/api#html-style
+_ALLOWED_HREF_SCHEMES = ("http://", "https://", "tg://", "mailto:")
+_WHITESPACE_RE = _re.compile(r"[ \t\r\n\f]+")
+_MULTI_NEWLINE_RE = _re.compile(r"\n{3,}")
+
+
+def _esc(text: str) -> str:
+    """Escape a plain-text node for Telegram HTML (<, >, &)."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _render_children(node: Tag, parts: list) -> None:
+    for child in node.children:
+        _render_node(child, parts)
+
+
+def _render_node(node, parts: list) -> None:
+    """Recursively convert one DOM node into Telegram-safe HTML appended to `parts`."""
+    if isinstance(node, NavigableString):
+        # Skip comments / doctypes (also NavigableString subclasses).
+        if node.__class__.__name__ in ("Comment", "Doctype", "ProcessingInstruction", "Declaration"):
+            return
+        text = _WHITESPACE_RE.sub(" ", str(node))
+        if text.strip() or text == " ":
+            parts.append(_esc(text))
+        return
+    if not isinstance(node, Tag):
+        return
+
+    name = (node.name or "").lower()
+
+    # Non-content tags
+    if name in ("script", "style", "head", "iframe", "svg"):
+        return
+    if name == "br":
+        parts.append("\n")
+        return
+    if name == "img":
+        # Media arrives via &attribute_insert_N& markers, not inline tags.
+        return
+
+    # Block-level containers: content + newline separator
+    if name in ("p", "div", "section", "article"):
+        _render_children(node, parts)
+        parts.append("\n")
+        return
+
+    if name in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        parts.append("<b>")
+        _render_children(node, parts)
+        parts.append("</b>\n")
+        return
+
+    # Inline formatting
+    if name in ("strong", "b"):
+        parts.append("<b>")
+        _render_children(node, parts)
+        parts.append("</b>")
+        return
+    if name in ("em", "i"):
+        parts.append("<i>")
+        _render_children(node, parts)
+        parts.append("</i>")
+        return
+    if name in ("s", "strike", "del"):
+        parts.append("<s>")
+        _render_children(node, parts)
+        parts.append("</s>")
+        return
+    if name == "u":
+        parts.append("<u>")
+        _render_children(node, parts)
+        parts.append("</u>")
+        return
+    if name in ("code", "kbd"):
+        parts.append("<code>")
+        _render_children(node, parts)
+        parts.append("</code>")
+        return
+    if name == "pre":
+        parts.append("<pre>")
+        _render_children(node, parts)
+        parts.append("</pre>\n")
+        return
+    if name == "blockquote":
+        parts.append("<blockquote>")
+        _render_children(node, parts)
+        parts.append("</blockquote>\n")
+        return
+    if name == "span" and "spoiler" in (node.get("class") or []):
+        parts.append("<tg-spoiler>")
+        _render_children(node, parts)
+        parts.append("</tg-spoiler>")
+        return
+
+    if name == "a":
+        href = (node.get("href") or "").strip()
+        safe = href.lower().startswith(_ALLOWED_HREF_SCHEMES)
+        if safe:
+            parts.append(f'<a href="{_esc(href)}">')
+            _render_children(node, parts)
+            parts.append("</a>")
+        else:
+            # Unsupported scheme: keep the text, drop the link.
+            _render_children(node, parts)
+        return
+
+    # Lists -> bullet lines
+    if name in ("ul", "ol"):
+        for li in node.find_all("li", recursive=False):
+            parts.append("• ")
+            _render_children(li, parts)
+            parts.append("\n")
+        parts.append("\n")
+        return
+    if name == "li":  # li outside ul/ol
+        parts.append("• ")
+        _render_children(node, parts)
+        parts.append("\n")
+        return
+
+    # Unknown / unsupported tag (sub, sup, table, font, ...): unwrap.
+    _render_children(node, parts)
+
+
+def to_telegram_html(html: str) -> str:
+    """Convert JoyReactor post HTML into the Telegram HTML subset
+    (parse_mode='HTML'): <b>/<i>/<u>/<s>/<a href>/<code>/<pre>/<blockquote>/
+    <tg-spoiler>. Unknown tags are unwrapped, text is entity-escaped, so the
+    result is always valid for Telegram's parser.
+
+    Renders like the site: <p>/<h3>/<div>/<li> become newline-separated
+    blocks, <br> becomes a newline, <strong> stays bold, links stay clickable.
+    """
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    parts: list = []
+    _render_children(soup, parts)
+    out = "".join(parts)
+    out = _MULTI_NEWLINE_RE.sub("\n\n", out)
+    return out.strip()
+
+
+def _plain_fallback(html: str) -> str:
+    """Plain-text view of already-converted Telegram HTML (parse-failure retry)."""
+    return _clean_html(html)
+
+
+# --------------------------------------------------------- message splitting
+
+_TAG_TOKEN_RE = _re.compile(r"<[^<>]+>")
+_TAG_NAME_RE = _re.compile(r"</?\s*([a-zA-Z0-9-]+)")
+
+
+def _closing_len(open_stack: list) -> int:
+    return sum(len(f"</{t}>") for t in open_stack)
+
+
+def split_html_for_telegram(html: str, limit: int = 4096) -> list[str]:
+    """Split a Telegram-HTML string into chunks that each fit `limit`
+    characters of SOURCE (source is always >= rendered length, so rendered
+    chunks are guaranteed within Telegram's message limit).
+
+    Rules:
+      * never breaks inside a tag;
+      * open tags are closed at the end of a chunk and reopened at the start
+        of the next one (e.g. <blockquote>/<b> survive the split);
+      * prefers cutting at newlines, then at spaces, then hard-cuts text
+        between tokens (entity-safe).
+    """
+    if not html:
+        return []
+    if len(html) <= limit:
+        return [html]
+
+    # Tokenize into tags and text spans.
+    tokens: list[tuple[bool, str]] = []  # (is_tag, value)
+    pos = 0
+    for m in _TAG_TOKEN_RE.finditer(html):
+        if m.start() > pos:
+            tokens.append((False, html[pos:m.start()]))
+        tokens.append((True, m.group(0)))
+        pos = m.end()
+    if pos < len(html):
+        tokens.append((False, html[pos:]))
+
+    chunks: list[str] = []
+    buf = ""                 # current chunk body (reopened tags included)
+    reopen_prefix = ""       # tags reopened at the start of the current chunk
+    open_stack: list[str] = []  # tags open across the whole stream
+    last_nl = -1             # buf-position of last "\n" (text only)
+    last_sp = -1             # buf-position of last space (text only)
+
+    def append_chunk(body: str):
+        piece = body
+        for t in reversed(open_stack):
+            piece += f"</{t}>"
+        if piece.strip():
+            chunks.append(piece)
+
+    i = 0
+    while i < len(tokens):
+        is_tag, val = tokens[i]
+
+        capacity = limit - len(reopen_prefix) - _closing_len(open_stack)
+        if len(buf) + len(val) <= capacity or (not buf and not val.strip() and not is_tag):
+            if is_tag:
+                m = _TAG_NAME_RE.match(val)
+                name = m.group(1).lower() if m else ""
+                if val.startswith("</"):
+                    if name in open_stack:
+                        idx = len(open_stack) - 1 - open_stack[::-1].index(name)
+                        del open_stack[idx:]
+                else:
+                    open_stack.append(name)
+                buf += val
+            else:
+                buf += val
+                nl = val.rfind("\n")
+                if nl != -1:
+                    last_nl = len(buf) - (len(val) - nl)
+                sp = val.rfind(" ")
+                if sp != -1:
+                    last_sp = len(buf) - (len(val) - sp)
+            i += 1
+            continue
+
+        # --- overflow: need a cut before this token ---
+        cut = -1
+        if last_nl > 0:
+            cut = last_nl + 1        # keep the newline with current chunk
+        elif last_sp > 0:
+            cut = last_sp + 1
+
+        if cut > 0 and cut < len(buf):
+            append_chunk(buf[:cut])
+            rest = buf[cut:].lstrip(" ")
+            reopen_prefix = "".join(f"<{t}>" for t in open_stack)
+            buf = reopen_prefix + rest
+            last_nl = last_sp = -1
+            if rest:
+                nl = rest.rfind("\n")
+                if nl != -1:
+                    last_nl = len(buf) - (len(rest) - nl)
+                sp = rest.rfind(" ")
+                if sp != -1:
+                    last_sp = len(buf) - (len(rest) - sp)
+            continue
+
+        if not is_tag:
+            # Hard-slice a lone oversized text token: prefer the last space /
+            # newline inside the slice, and never cut inside an "&...;".
+            room = capacity - len(buf)
+            if room <= 0:
+                append_chunk(buf)
+                reopen_prefix = "".join(f"<{t}>" for t in open_stack)
+                buf = reopen_prefix
+                room = limit - len(reopen_prefix) - _closing_len(open_stack)
+            piece = val[:room]
+            cut_at = max(piece.rfind("\n"), piece.rfind(" "))
+            if cut_at > 0:
+                piece = piece[:cut_at + 1]  # keep the separator with the piece
+            else:
+                amp = piece.rfind("&")
+                semi = piece.rfind(";")
+                if amp != -1 and (semi == -1 or semi < amp):
+                    piece = piece[:amp]
+            append_chunk(buf + piece)
+            reopen_prefix = "".join(f"<{t}>" for t in open_stack)
+            buf = reopen_prefix
+            last_nl = last_sp = -1
+            tokens[i] = (False, val[len(piece):])
+            if not tokens[i][1]:
+                i += 1
+            continue
+
+        # Oversized tag (pathological): take it whole.
+        buf += val
+        i += 1
+
+    append_chunk(buf)
+    return chunks or ([html] if html else [])
+
+
+def _is_parse_error(e: TelegramBadRequest) -> bool:
+    """True when Telegram rejected our message because it couldn't parse the
+    HTML entities (as opposed to network/limit/media errors)."""
+    msg = (str(e) or "").lower()
+    return "can't parse entities" in msg or "unsupported start tag" in msg or "unclosed tag" in msg
 
 
 def _make_caption(text: Optional[str], link: str = "", limit: int = TELEGRAM_CAPTION_LIMIT) -> str:
@@ -380,6 +674,14 @@ class DeliveryService:
                 return
             cap = text_to_caption()
             cur_text_chunks.clear()
+            # Captions are capped at 1024 by Telegram. A longer caption would
+            # previously be truncated (content loss) — instead promote it to
+            # a standalone text message right before the album, which is
+            # also closer to the site layout. Reserve room for the source
+            # link appended later ("\n\n🔗 https://joyreactor.cc/post/N").
+            if cap and len(cap) > TELEGRAM_CAPTION_LIMIT - 64:
+                runs.append({"kind": "text", "text": cap})
+                cap = None
             for start in range(0, len(cur_media), 10):
                 chunk = cur_media[start:start + 10]
                 runs.append({
@@ -391,7 +693,10 @@ class DeliveryService:
 
         for kind, payload in blocks:
             if kind == "text":
-                chunk = _clean_html(payload)
+                # Convert to the Telegram HTML subset; runs are sent with
+                # parse_mode='HTML' so formatting (bold/links/spoilers)
+                # survives, matching how the post looks on the site.
+                chunk = to_telegram_html(payload)
                 if not chunk:
                     continue
                 if cur_media:
@@ -498,22 +803,51 @@ class DeliveryService:
         with_kb: bool = False,
         tag_kb=None,
     ) -> Optional[types.Message]:
-        """Send a standalone text message. The source link is appended
-        whenever one was requested by the caller (show_post_links on), so
-        links appear regardless of whether the last run is text or media."""
+        """Send a standalone text message (Telegram HTML: bold, italics,
+        links, spoilers). The source link is appended to the LAST chunk.
+        Text longer than Telegram's 4096-char limit is split into several
+        messages at tag-safe boundaries (open tags are closed and reopened).
+
+        If Telegram rejects the HTML (can't parse entities), retries once
+        with plain text so the post is never lost to a formatting edge case.
+        """
         if not text.strip():
             return None
-        text_to_send = text.strip()
-        if source_link and not text_to_send.rstrip().endswith(source_link):
-            text_to_send = text_to_send.rstrip() + f"\n\n🔗 {source_link}"
-        elif not text_to_send and source_link:
-            text_to_send = f"🔗 {source_link}"
-        return await self.bot.send_message(
-            chat_id=chat_id,
-            text=text_to_send,
-            disable_web_page_preview=True,
-            reply_markup=(tag_kb if with_kb else None),
-        )
+        # Reserve room in the last chunk for the source link.
+        link_block = f"\n\n🔗 {source_link}" if source_link else ""
+        chunks = split_html_for_telegram(text.strip(), TELEGRAM_MESSAGE_LIMIT - len(link_block))
+        if not chunks:
+            return None
+
+        last_msg: Optional[types.Message] = None
+        for i, chunk in enumerate(chunks):
+            is_last = i == len(chunks) - 1
+            out = chunk.rstrip() + link_block if (is_last and link_block) else chunk
+            kb = tag_kb if (with_kb and is_last) else None
+            try:
+                msg = await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=out,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            except TelegramBadRequest as e:
+                if not _is_parse_error(e):
+                    raise
+                logger.warning("text_html_parse_failed_plain_retry", chat_id=chat_id, error=str(e))
+                plain = _plain_fallback(out)
+                if not plain and is_last and source_link:
+                    plain = f"🔗 {source_link}"
+                msg = await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain,
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            if msg:
+                last_msg = msg
+        return last_msg
 
     async def _send_media_run(
         self,
@@ -536,11 +870,27 @@ class DeliveryService:
             else:
                 cap = f"🔗 {source_link}"
         if cap and len(cap) > TELEGRAM_CAPTION_LIMIT:
-            cap = cap[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
-        # NOTE: aiogram's send_media_group does NOT accept reply_markup.
-        # We send the album first, then edit the last message's markup if
-        # requested.
-        messages = await self._send_media_group_raw(chat_id, chunk, caption=cap)
+            # Naive truncation could cut an HTML tag in half and break the
+            # parser — degrade to plain text when the HTML doesn't fit.
+            cap = _plain_fallback(cap)[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
+            parse_mode = None
+        else:
+            parse_mode = "HTML"
+        try:
+            messages = await self._send_media_group_raw(
+                chat_id, chunk, caption=cap, parse_mode=parse_mode,
+            )
+        except TelegramBadRequest as e:
+            if not _is_parse_error(e):
+                raise
+            # Rare edge (unexpected markup edge case): resend the album
+            # with a plain-text caption. Nothing was sent on the failed call,
+            # so this cannot duplicate media.
+            logger.warning("caption_html_parse_failed_plain_retry", chat_id=chat_id, error=str(e))
+            messages = await self._send_media_group_raw(
+                chat_id, chunk,
+                caption=(_plain_fallback(cap) if cap else None),
+            )
         last_msg = None
         if isinstance(messages, list) and messages:
             last_msg = messages[-1]
@@ -731,20 +1081,36 @@ class DeliveryService:
         chat_id: int,
         chunk: list[tuple[int, Path, str]],
         caption: Optional[str] = None,
+        parse_mode: Optional[str] = None,
     ):
         """Send a media group. aiogram's send_media_group does NOT accept
         reply_markup — the caller must attach the keyboard afterwards via
-        edit_reply_markup on the last message of the returned album."""
+        edit_reply_markup on the last message of the returned album.
+
+        The caption (with its parse_mode) is set on the FIRST media item:
+        MediaGroupBuilder has no parse_mode of its own, and build() only
+        propagates the builder-level caption when one is set there."""
         from aiogram.utils.media_group import MediaGroupBuilder
 
         if not chunk:
             return None
-        builder = MediaGroupBuilder(caption=caption)
-        for _, path, mime in chunk:
+        builder = MediaGroupBuilder()
+        for i, (_, path, mime) in enumerate(chunk):
+            is_first = i == 0
+            item_caption = caption if is_first else None
+            item_parse_mode = parse_mode if (is_first and caption is not None) else None
             if mime.startswith("image/"):
-                builder.add_photo(media=types.FSInputFile(path))
+                builder.add_photo(
+                    media=types.FSInputFile(path),
+                    caption=item_caption,
+                    parse_mode=item_parse_mode,
+                )
             else:
-                builder.add_video(media=types.FSInputFile(path))
+                builder.add_video(
+                    media=types.FSInputFile(path),
+                    caption=item_caption,
+                    parse_mode=item_parse_mode,
+                )
         return await self.bot.send_media_group(
             chat_id=chat_id, media=builder.build(),
         )
